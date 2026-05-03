@@ -1,0 +1,29 @@
+services:
+  llm-wiki:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: lmit-wiki:latest
+    container_name: lmit-wiki
+    restart: unless-stopped
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    volumes:
+      - ./config/wiki-only.example.toml:/config/wiki-only.toml:ro
+      - ./knowledge_base:/data/knowledge_base
+      - ./output/raw/ai:/data/raw/ai:ro
+      - ./output/raw/articles:/data/raw/articles:ro
+      - ./output/raw/notes:/data/raw/notes:ro
+    ports:
+      - "8765:8765"
+    command:
+      - lmit-wiki
+      - serve
+      - --config
+      - /config/wiki-only.toml
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8765"

@@ -1,0 +1,30 @@
+[wiki]
+root_dir = "/data/knowledge_base"
+raw_dir = "/data/knowledge_base/raw"
+sources_dir = "/data/knowledge_base/wiki/sources"
+topics_dir = "/data/knowledge_base/wiki/topics"
+entities_dir = "/data/knowledge_base/wiki/entities"
+queries_dir = "/data/knowledge_base/wiki/queries"
+schema_dir = "/data/knowledge_base/schema"
+log_path = "/data/knowledge_base/wiki/log.md"
+index_path = "/data/knowledge_base/wiki/index.md"
+
+[wiki_ingest]
+# Mount already-converted Markdown folders read-only into the container and
+# list each root here. When more than one source is configured, LMIT uses the
+# final path segment as a stable source namespace, such as raw/ai/sample.md.
+# Keep these mount names durable; changing /data/raw/ai to /data/raw/ai-new
+# changes the wiki source identity.
+source_dirs = [
+  "/data/raw/ai",
+  "/data/raw/articles",
+  "/data/raw/notes",
+]
+
+[wiki_runtime]
+settings_path = "/data/knowledge_base/.wiki_runtime.json"
+state_path = "/data/knowledge_base/.wiki_state.json"
+auto_sync_on_ingest = true
+search_limit = 8
+serve_host = "0.0.0.0"
+serve_port = 8765
