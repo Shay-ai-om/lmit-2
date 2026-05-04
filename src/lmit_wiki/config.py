@@ -35,10 +35,24 @@ class WikiRuntimeConfig:
 
 
 @dataclass(frozen=True)
+class WindowsTaskScheduleConfig:
+    enabled: bool
+    ingest_interval_minutes: int
+    sync_interval_minutes: int
+    lint_interval_minutes: int
+
+
+@dataclass(frozen=True)
+class WindowsConfig:
+    task_schedule: WindowsTaskScheduleConfig
+
+
+@dataclass(frozen=True)
 class AppConfig:
     wiki: WikiConfig
     wiki_ingest: WikiIngestConfig
     wiki_runtime: WikiRuntimeConfig
+    windows: WindowsConfig
 
 
 def default_config(cwd: Path | None = None) -> AppConfig:
@@ -64,6 +78,14 @@ def default_config(cwd: Path | None = None) -> AppConfig:
             search_limit=8,
             serve_host="127.0.0.1",
             serve_port=8765,
+        ),
+        windows=WindowsConfig(
+            task_schedule=WindowsTaskScheduleConfig(
+                enabled=False,
+                ingest_interval_minutes=60,
+                sync_interval_minutes=240,
+                lint_interval_minutes=1440,
+            ),
         ),
     )
 
@@ -126,7 +148,33 @@ def load_config(path: Path | None = None) -> AppConfig:
         serve_port=int(runtime_data.get("serve_port", cfg.wiki_runtime.serve_port)),
     )
 
-    return AppConfig(wiki=wiki, wiki_ingest=ingest, wiki_runtime=runtime)
+    windows_data = data.get("windows", {})
+    task_data = windows_data.get("task_schedule", {}) if isinstance(windows_data, dict) else {}
+    windows = WindowsConfig(
+        task_schedule=WindowsTaskScheduleConfig(
+            enabled=bool(task_data.get("enabled", cfg.windows.task_schedule.enabled)),
+            ingest_interval_minutes=int(
+                task_data.get(
+                    "ingest_interval_minutes",
+                    cfg.windows.task_schedule.ingest_interval_minutes,
+                )
+            ),
+            sync_interval_minutes=int(
+                task_data.get(
+                    "sync_interval_minutes",
+                    cfg.windows.task_schedule.sync_interval_minutes,
+                )
+            ),
+            lint_interval_minutes=int(
+                task_data.get(
+                    "lint_interval_minutes",
+                    cfg.windows.task_schedule.lint_interval_minutes,
+                )
+            ),
+        ),
+    )
+
+    return AppConfig(wiki=wiki, wiki_ingest=ingest, wiki_runtime=runtime, windows=windows)
 
 
 def _resolve_path(value: object, default: Path, base: Path) -> Path:

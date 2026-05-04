@@ -15,6 +15,8 @@ class SourceDocument:
     size: int
     urls: list[str]
     excerpt: str
+    source_id: str = "raw"
+    storage_key: str = ""
 
 
 @dataclass(frozen=True)

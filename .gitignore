@@ -2,9 +2,14 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.pytest_tmp/
+pytest-tmp/
+pytest-tmp-safe/
 .mypy_cache/
 .ruff_cache/
 .venv/
+build/
+dist/
 
 /knowledge_base/
 /raw/

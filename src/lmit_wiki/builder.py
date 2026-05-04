@@ -67,19 +67,28 @@ def ingest_wiki(
     for source_root, source_id in zip(source_roots, source_ids, strict=True):
         for source_path in sorted(source_root.rglob("*.md")):
             source_relative_path = source_path.resolve().relative_to(source_root)
-            relative_path = (
-                Path(source_id) / source_relative_path
-                if source_id is not None
-                else source_relative_path
-            )
+            relative_path = Path(source_id) / source_relative_path
             text = source_path.read_text(encoding="utf-8", errors="ignore")
             content_hash = sha256(text.encode("utf-8")).hexdigest()
-            raw_path = ensure_within_root(cfg.wiki.raw_dir / relative_path, cfg.wiki.raw_dir)
+            storage_key = _source_storage_key(
+                source_id=source_id,
+                source_relative_path=source_relative_path,
+                content_hash=content_hash,
+            )
+            stored_raw_relative_path = _stored_raw_relative_path(
+                source_id=source_id,
+                source_relative_path=source_relative_path,
+                storage_key=storage_key,
+            )
+            raw_path = ensure_within_root(
+                cfg.wiki.raw_dir / stored_raw_relative_path,
+                cfg.wiki.raw_dir,
+            )
             raw_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, raw_path)
             copied += 1
 
-            note_name = source_note_name(relative_path, content_hash)
+            note_name = source_note_name(storage_key)
             source_note_path = ensure_within_root(
                 cfg.wiki.sources_dir / note_name,
                 cfg.wiki.sources_dir,
@@ -94,6 +103,8 @@ def ingest_wiki(
                 size=len(text.encode("utf-8")),
                 urls=extract_urls(text),
                 excerpt=excerpt(text),
+                source_id=source_id,
+                storage_key=storage_key,
             )
             safe_write_text(source_note_path, cfg.wiki.sources_dir, render_source_note(doc, cfg))
             source_notes += 1
@@ -144,8 +155,13 @@ def render_source_note(doc: SourceDocument, cfg: AppConfig) -> str:
     return (
         "---\n"
         f"title: {json.dumps(doc.title, ensure_ascii=False)}\n"
+        f"source_id: {json.dumps(doc.source_id, ensure_ascii=False)}\n"
+        f"storage_key: {json.dumps(doc.storage_key, ensure_ascii=False)}\n"
         f"source_path: {json.dumps(str(doc.source_path), ensure_ascii=False)}\n"
+        f"original_source_path: {json.dumps(str(doc.source_path), ensure_ascii=False)}\n"
+        f"original_relative_path: {json.dumps(doc.relative_path.as_posix(), ensure_ascii=False)}\n"
         f"raw_path: {json.dumps(raw_rel, ensure_ascii=False)}\n"
+        f"stored_raw_path: {json.dumps(raw_rel, ensure_ascii=False)}\n"
         f"source_note: {json.dumps(source_note_rel, ensure_ascii=False)}\n"
         f"content_hash: {doc.content_hash}\n"
         f"size_bytes: {doc.size}\n"
@@ -153,7 +169,9 @@ def render_source_note(doc: SourceDocument, cfg: AppConfig) -> str:
         f"# {doc.title}\n\n"
         "## Source\n\n"
         f"- Original: `{doc.source_path}`\n"
+        f"- Original relative path: `{doc.relative_path.as_posix()}`\n"
         f"- Raw copy: [{raw_rel}]({raw_link})\n"
+        f"- Storage key: `{doc.storage_key}`\n"
         f"- Content hash: `{doc.content_hash}`\n\n"
         "## URLs\n\n"
         f"{urls}\n\n"
@@ -211,10 +229,18 @@ def write_manifest(cfg: AppConfig, docs: list[SourceDocument]) -> None:
         "sources": [
             {
                 **asdict(doc),
+                "source_id": doc.source_id,
+                "storage_key": doc.storage_key,
                 "source_path": str(doc.source_path),
+                "original_source_path": str(doc.source_path),
                 "relative_path": doc.relative_path.as_posix(),
+                "original_relative_path": doc.relative_path.as_posix(),
                 "raw_path": str(doc.raw_path),
+                "stored_raw_path": doc.raw_path.relative_to(cfg.wiki.root_dir).as_posix(),
                 "source_note_path": str(doc.source_note_path),
+                "stored_source_note_path": doc.source_note_path.relative_to(
+                    cfg.wiki.root_dir
+                ).as_posix(),
                 "visibility": source_visibility({"urls": doc.urls}),
                 "llm_policy": llm_policy_for_sources(
                     [{"visibility": source_visibility({"urls": doc.urls})}]
@@ -245,12 +271,31 @@ def load_manifest_sources(cfg: AppConfig) -> list[SourceDocument]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     docs: list[SourceDocument] = []
     for record in manifest.get("sources", []):
-        relative_path = Path(str(record.get("relative_path") or record.get("raw_path") or "source.md"))
-        raw_path = Path(str(record.get("raw_path") or cfg.wiki.raw_dir / relative_path))
-        source_note_path = Path(
-            str(record.get("source_note_path") or cfg.wiki.sources_dir / relative_path.name)
+        relative_path = Path(
+            str(
+                record.get("original_relative_path")
+                or record.get("relative_path")
+                or record.get("raw_path")
+                or "source.md"
+            )
         )
-        source_path = Path(str(record.get("source_path") or raw_path))
+        raw_path = _manifest_record_path(
+            record,
+            absolute_key="raw_path",
+            stored_key="stored_raw_path",
+            root=cfg.wiki.root_dir,
+            default=cfg.wiki.raw_dir / relative_path.name,
+        )
+        source_note_path = _manifest_record_path(
+            record,
+            absolute_key="source_note_path",
+            stored_key="stored_source_note_path",
+            root=cfg.wiki.root_dir,
+            default=cfg.wiki.sources_dir / f"{relative_path.stem}.md",
+        )
+        source_path = Path(
+            str(record.get("original_source_path") or record.get("source_path") or raw_path)
+        )
         docs.append(
             SourceDocument(
                 source_path=source_path,
@@ -262,6 +307,8 @@ def load_manifest_sources(cfg: AppConfig) -> list[SourceDocument]:
                 size=int(record.get("size") or 0),
                 urls=[str(item) for item in record.get("urls", [])],
                 excerpt=str(record.get("excerpt") or ""),
+                source_id=str(record.get("source_id") or relative_path.parts[0] or "raw"),
+                storage_key=str(record.get("storage_key") or ""),
             )
         )
     return docs
@@ -320,10 +367,7 @@ def _source_roots(
     return tuple(path.resolve() for path in cfg.wiki_ingest.source_dirs)
 
 
-def _source_ids_for_roots(roots: tuple[Path, ...]) -> list[str | None]:
-    if len(roots) == 1:
-        return [None]
-
+def _source_ids_for_roots(roots: tuple[Path, ...]) -> list[str]:
     used: dict[str, int] = {}
     source_ids: list[str] = []
     for root in roots:
@@ -334,7 +378,49 @@ def _source_ids_for_roots(roots: tuple[Path, ...]) -> list[str | None]:
     return source_ids
 
 
-def _safe_source_id(value: str) -> str:
+def _safe_source_id(value: str, *, max_chars: int = 32) -> str:
     normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip(".-_")
+    normalized = normalized[:max_chars].strip(".-_")
     return normalized or "raw"
+
+
+def _source_storage_key(
+    *,
+    source_id: str,
+    source_relative_path: Path,
+    content_hash: str,
+) -> str:
+    raw = "\n".join([source_id, source_relative_path.as_posix(), content_hash])
+    return sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _stored_raw_relative_path(
+    *,
+    source_id: str,
+    source_relative_path: Path,
+    storage_key: str,
+) -> Path:
+    slug = _safe_source_id(source_relative_path.with_suffix("").name, max_chars=48)
+    return Path(source_id) / f"{storage_key}-{slug}.md"
+
+
+def _manifest_record_path(
+    record: dict,
+    *,
+    absolute_key: str,
+    stored_key: str,
+    root: Path,
+    default: Path,
+) -> Path:
+    value = record.get(absolute_key)
+    if value:
+        path = Path(str(value))
+        return path if path.is_absolute() else root / path
+
+    stored = record.get(stored_key)
+    if stored:
+        path = Path(str(stored))
+        return path if path.is_absolute() else root / path
+
+    return default
 

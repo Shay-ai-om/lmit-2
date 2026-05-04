@@ -11,7 +11,7 @@ from lmit_wiki.path_safety import ensure_within_root, safe_write_text
 from lmit_wiki.builder import append_log, init_wiki, refresh_index
 from lmit_wiki.policy import llm_policy_for_sources
 from lmit_wiki.runtime import invoke_json_completion
-from lmit_wiki.text import slugify, strip_frontmatter
+from lmit_wiki.text import portable_markdown_filename, strip_frontmatter
 
 
 @dataclass(frozen=True)
@@ -157,7 +157,10 @@ def _upsert_page(
     title = str(item.get("name") or "").strip()
     if not title:
         raise ValueError(f"missing {kind} page name in LLM output")
-    path = ensure_within_root(page_root / f"{slugify(title)}.md", page_root)
+    path = ensure_within_root(
+        page_root / portable_markdown_filename(title, fallback=kind),
+        page_root,
+    )
     timestamp = datetime.now(timezone.utc).isoformat()
     summary = str(item.get("summary") or "").strip()
     key_points = [str(value).strip() for value in item.get("key_points", []) if str(value).strip()]

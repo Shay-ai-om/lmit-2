@@ -12,7 +12,7 @@ import re
 from lmit_wiki.config import AppConfig
 from lmit_wiki.path_safety import ensure_within_root, safe_write_text
 from lmit_wiki.builder import append_log, init_wiki
-from lmit_wiki.text import slugify
+from lmit_wiki.text import portable_markdown_filename
 
 
 RESTRICTED_DOMAINS = {
@@ -147,7 +147,10 @@ def render_candidates(candidates: list[Candidate], cfg: AppConfig, kind: str) ->
 
     for candidate in candidates:
         page_dir = cfg.wiki.topics_dir if kind == "topic" else cfg.wiki.entities_dir
-        suggested_path = page_dir / f"{slugify(candidate.name)}.md"
+        suggested_path = page_dir / portable_markdown_filename(
+            candidate.name,
+            fallback=kind,
+        )
         suggested_rel = suggested_path.relative_to(cfg.wiki.root_dir).as_posix()
         lines.extend(
             [

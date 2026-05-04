@@ -1,10 +1,12 @@
 ﻿from __future__ import annotations
 
-from pathlib import Path
+from hashlib import sha256
 import re
 import unicodedata
 
 
+MAX_PORTABLE_FILENAME_CHARS = 120
+DEFAULT_SLUG_CHARS = 72
 URL_PATTERN = re.compile(r"https?://[^\s<>\"'\]\)}]+")
 GENERIC_HEADINGS = {
     "txt source",
@@ -13,6 +15,14 @@ GENERIC_HEADINGS = {
     "url fetched content",
     "original text",
     "extracted urls",
+}
+WINDOWS_RESERVED_NAMES = {
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    *(f"com{index}" for index in range(1, 10)),
+    *(f"lpt{index}" for index in range(1, 10)),
 }
 
 
@@ -87,16 +97,51 @@ def extract_urls(markdown: str) -> list[str]:
     return urls
 
 
-def slugify(value: str, *, fallback: str = "note") -> str:
+def slugify(
+    value: str,
+    *,
+    fallback: str = "note",
+    max_chars: int = DEFAULT_SLUG_CHARS,
+) -> str:
     normalized = unicodedata.normalize("NFKD", value)
     ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", ascii_text).strip("-").lower()
-    return slug or fallback
+    slug = slug or fallback
+    slug = slug[: max(8, max_chars)].strip("-._")
+    if not slug:
+        slug = fallback
+    if slug.lower() in WINDOWS_RESERVED_NAMES:
+        slug = f"{slug}-page"
+    return slug
 
 
-def source_note_name(relative_path: Path, content_hash: str) -> str:
-    slug = slugify(relative_path.with_suffix("").as_posix(), fallback="source")
-    return f"{slug}-{content_hash[:10]}.md"
+def hashed_slug(
+    value: str,
+    *,
+    fallback: str = "page",
+    max_chars: int = DEFAULT_SLUG_CHARS,
+    digest_chars: int = 10,
+) -> str:
+    digest = sha256(value.encode("utf-8", errors="ignore")).hexdigest()[:digest_chars]
+    available = max(8, max_chars - digest_chars - 1)
+    slug = slugify(value, fallback=fallback, max_chars=available)
+    return f"{slug}-{digest}"
+
+
+def portable_markdown_filename(
+    value: str,
+    *,
+    fallback: str = "page",
+    max_chars: int = MAX_PORTABLE_FILENAME_CHARS,
+) -> str:
+    suffix = ".md"
+    stem_chars = max(16, max_chars - len(suffix))
+    return f"{hashed_slug(value, fallback=fallback, max_chars=stem_chars)}{suffix}"
+
+
+def source_note_name(storage_key: str) -> str:
+    safe_key = re.sub(r"[^a-fA-F0-9]+", "", storage_key)[:16].lower()
+    return f"source-{safe_key or 'unknown'}.md"
 
 
 def strip_frontmatter(markdown: str) -> str:

@@ -10,7 +10,7 @@ import re
 from lmit_wiki.config import AppConfig
 from lmit_wiki.path_safety import safe_write_text
 from lmit_wiki.builder import append_log
-from lmit_wiki.text import slugify
+from lmit_wiki.text import portable_markdown_filename
 
 
 THEMES = {
@@ -64,7 +64,7 @@ def _organize_kind(
     organized: list[OrganizedPage] = []
     for candidate in candidates:
         name = candidate["name"]
-        path = root / f"{slugify(name)}.md"
+        path = root / portable_markdown_filename(name, fallback=kind)
         if not path.exists():
             continue
         if not overwrite and "status: organized-draft" in path.read_text(encoding="utf-8"):

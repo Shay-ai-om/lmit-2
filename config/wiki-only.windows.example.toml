@@ -1,0 +1,30 @@
+[wiki]
+root_dir = "knowledge_base"
+raw_dir = "knowledge_base/raw"
+sources_dir = "knowledge_base/wiki/sources"
+topics_dir = "knowledge_base/wiki/topics"
+entities_dir = "knowledge_base/wiki/entities"
+queries_dir = "knowledge_base/wiki/queries"
+schema_dir = "knowledge_base/schema"
+log_path = "knowledge_base/wiki/log.md"
+index_path = "knowledge_base/wiki/index.md"
+
+[wiki_ingest]
+# Point this at the raw Markdown folder produced by LMIT-1.
+source_dirs = [
+  "output/raw",
+]
+
+[wiki_runtime]
+settings_path = "knowledge_base/.wiki_runtime.json"
+state_path = "knowledge_base/.wiki_state.json"
+auto_sync_on_ingest = false
+search_limit = 8
+serve_host = "127.0.0.1"
+serve_port = 8765
+
+[windows.task_schedule]
+enabled = true
+ingest_interval_minutes = 60
+sync_interval_minutes = 240
+lint_interval_minutes = 1440

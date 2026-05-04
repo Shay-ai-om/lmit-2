@@ -12,7 +12,7 @@ from lmit_wiki.builder import append_log, init_wiki, refresh_index
 from lmit_wiki.policy import EXTERNAL_LLM_ALLOWED, llm_policy_for_sources
 from lmit_wiki.runtime import LLMCompletion, invoke_json_completion
 from lmit_wiki.search import SearchResult, search_wiki
-from lmit_wiki.text import slugify, strip_frontmatter
+from lmit_wiki.text import hashed_slug, strip_frontmatter
 
 
 @dataclass(frozen=True)
@@ -235,7 +235,8 @@ def _render_query_page(
 
 
 def _unique_query_filename(cfg: AppConfig, title: str, timestamp: datetime) -> str:
-    stem = f"{timestamp.strftime('%Y%m%dT%H%M%SZ')}-{slugify(title or 'query')}"
+    slug = hashed_slug(title or "query", fallback="query", max_chars=72)
+    stem = f"{timestamp.strftime('%Y%m%dT%H%M%SZ')}-{slug}"
     candidate = f"{stem}.md"
     count = 2
     while (cfg.wiki.queries_dir / candidate).exists():

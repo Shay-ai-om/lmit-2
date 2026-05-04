@@ -1,4 +1,7 @@
-# LMIT Part 2 NAS Docker Deployment
+# LMIT Part 2 Legacy NAS Docker Deployment
+
+This is now an optional legacy deployment path. The primary LMIT-2 target is the
+local Windows installer documented in `docs/windows-local-install.md`.
 
 This deployment runs the wiki-only layer on a NAS or Unraid host. The NAS stores
 files, serves the lightweight web UI, and runs scheduled commands. It does not

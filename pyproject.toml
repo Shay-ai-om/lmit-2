@@ -14,6 +14,9 @@ dependencies = []
 dev = [
   "pytest>=8.0",
 ]
+packaging = [
+  "pyinstaller>=6.0",
+]
 
 [project.scripts]
 lmit-wiki = "lmit_wiki.cli:main"
