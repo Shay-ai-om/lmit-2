@@ -18,6 +18,15 @@ def test_windows_config_template_is_localhost_and_schedules_tasks():
     assert cfg.windows.task_schedule.ingest_interval_minutes == 60
 
 
+def test_load_config_accepts_utf8_bom(tmp_path):
+    config_path = tmp_path / "wiki-only.toml"
+    config_path.write_text("\ufeff[wiki_runtime]\nserve_port = 9001\n", encoding="utf-8")
+
+    cfg = load_config(config_path)
+
+    assert cfg.wiki_runtime.serve_port == 9001
+
+
 def test_pyinstaller_spec_builds_lmit_wiki_exe():
     text = (ROOT / "packaging" / "windows" / "lmit-wiki.spec").read_text(encoding="utf-8")
 
@@ -47,6 +56,7 @@ def test_windows_task_scripts_register_and_remove_scheduled_tasks():
     install_text = (scripts_dir / "install-scheduled-tasks.ps1").read_text(encoding="utf-8")
     remove_text = (scripts_dir / "remove-scheduled-tasks.ps1").read_text(encoding="utf-8")
     start_text = (scripts_dir / "start-console.ps1").read_text(encoding="utf-8")
+    init_text = (scripts_dir / "init-windows-install.ps1").read_text(encoding="utf-8")
 
     assert "Register-ScheduledTask" in install_text
     assert "LMIT-2 Wiki Ingest" in install_text
@@ -54,3 +64,6 @@ def test_windows_task_scripts_register_and_remove_scheduled_tasks():
     assert "LMIT-2 Wiki Lint" in install_text
     assert "Unregister-ScheduledTask" in remove_text
     assert "127.0.0.1:8765" in start_text
+    assert "UTF8Encoding($false)" in init_text
+    assert "WriteAllText" in init_text
+    assert "if ($LASTEXITCODE -ne 0)" in init_text

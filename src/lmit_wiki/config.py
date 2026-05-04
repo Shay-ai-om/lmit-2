@@ -97,7 +97,10 @@ def load_config(path: Path | None = None) -> AppConfig:
 
     config_path = path.resolve()
     base = config_path.parent
-    data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    config_text = config_path.read_text(encoding="utf-8")
+    if config_text.startswith("\ufeff"):
+        config_text = config_text.lstrip("\ufeff")
+    data = tomllib.loads(config_text)
 
     wiki_data = data.get("wiki", {})
     wiki_root = _resolve_path(wiki_data.get("root_dir"), cfg.wiki.root_dir, base)

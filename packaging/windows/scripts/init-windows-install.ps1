@@ -51,10 +51,14 @@ sync_interval_minutes = 240
 lint_interval_minutes = 1440
 "@
 
-Set-Content -LiteralPath $ConfigPath -Value $config -Encoding UTF8
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($ConfigPath, $config, $utf8NoBom)
 
 $ExePath = Join-Path $InstallDir "lmit-wiki.exe"
 & $ExePath init --config $ConfigPath
+if ($LASTEXITCODE -ne 0) {
+    throw "lmit-wiki init failed with exit code $LASTEXITCODE"
+}
 
 if ($InstallTasks) {
     & (Join-Path $InstallDir "scripts\install-scheduled-tasks.ps1") `
