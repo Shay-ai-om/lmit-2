@@ -87,6 +87,9 @@ Then open:
 http://127.0.0.1:8765
 ```
 
+If the UI still does not appear, check that the installer created
+`%APPDATA%\LMIT-2\wiki-only.toml` and that port `8765` is free on the machine.
+
 Confirm that long LMIT-1 filenames are visible in `manifest.json` as original
 paths, while files under `knowledge_base/raw/` and `knowledge_base/wiki/` have
 short portable names.
