@@ -1,5 +1,5 @@
 #define AppName "LMIT-2 Wiki"
-#define AppVersion "0.1.3"
+#define AppVersion "0.1.4"
 #define AppPublisher "LMIT"
 
 [Setup]
@@ -29,9 +29,6 @@ Source: "..\..\config\wiki-only.windows.example.toml"; DestDir: "{app}\config"; 
 [Icons]
 Name: "{group}\LMIT-2 Wiki Console"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\start-console.ps1"" -InstallDir ""{app}"" -ConfigPath ""{userappdata}\LMIT-2\wiki-only.toml"""
 Name: "{group}\LMIT-2 CLI Help"; Filename: "cmd.exe"; Parameters: "/K ""{app}\lmit-wiki.exe"" --help"
-Name: "{group}\LMIT-2 Ingest Now"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\ingest-now.ps1"" -InstallDir ""{app}"" -ConfigPath ""{userappdata}\LMIT-2\wiki-only.toml"""
-Name: "{group}\LMIT-2 Sync Now"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\sync-now.ps1"" -InstallDir ""{app}"" -ConfigPath ""{userappdata}\LMIT-2\wiki-only.toml"""
-Name: "{group}\LMIT-2 Lint Now"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\lint-now.ps1"" -InstallDir ""{app}"" -ConfigPath ""{userappdata}\LMIT-2\wiki-only.toml"""
 Name: "{autodesktop}\LMIT-2 Wiki Console"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\start-console.ps1"" -InstallDir ""{app}"" -ConfigPath ""{userappdata}\LMIT-2\wiki-only.toml"""; Tasks: desktopicon
 
 [Run]

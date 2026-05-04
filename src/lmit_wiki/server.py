@@ -6,6 +6,7 @@ from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
 import json
 
+from lmit_wiki.builder import ingest_wiki, lint_wiki
 from lmit_wiki.config import AppConfig
 from lmit_wiki.auto import auto_sync_wiki
 from lmit_wiki.query import answer_wiki_query
@@ -42,6 +43,39 @@ class WikiWebApp:
         try:
             if method == "GET" and path == "/":
                 return self._html(start_response, INDEX_HTML)
+            if method == "GET" and path == "/api/status":
+                return self._json(
+                    start_response,
+                    {
+                        "root_dir": str(self.cfg.wiki.root_dir),
+                        "source_dirs": [str(path) for path in self.cfg.wiki_ingest.source_dirs],
+                        "index_path": str(self.cfg.wiki.index_path),
+                        "log_path": str(self.cfg.wiki.log_path),
+                        "serve_host": self.cfg.wiki_runtime.serve_host,
+                        "serve_port": self.cfg.wiki_runtime.serve_port,
+                    },
+                )
+            if method == "POST" and path == "/api/ingest":
+                result = ingest_wiki(self.cfg)
+                return self._json(
+                    start_response,
+                    {
+                        "source_count": result.source_count,
+                        "copied_raw_count": result.copied_raw_count,
+                        "source_note_count": result.source_note_count,
+                        "index_path": str(result.index_path),
+                        "log_path": str(result.log_path),
+                    },
+                )
+            if method == "POST" and path == "/api/lint":
+                warnings = lint_wiki(self.cfg)
+                return self._json(
+                    start_response,
+                    {
+                        "passed": not warnings,
+                        "warnings": warnings,
+                    },
+                )
             if method == "GET" and path == "/api/search":
                 query = parse_qs(environ.get("QUERY_STRING", "")).get("q", [""])[0]
                 results = [
@@ -311,6 +345,15 @@ INDEX_HTML = """<!doctype html>
       font-size: 12px;
     }
 
+    .path-list {
+      display: grid;
+      gap: 8px;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+      color: var(--muted);
+      word-break: break-all;
+    }
+
     .status {
       min-height: 22px;
       color: var(--muted);
@@ -357,6 +400,19 @@ INDEX_HTML = """<!doctype html>
       </section>
 
       <section class="panel stack">
+        <div>
+          <h2>Knowledge Base</h2>
+          <div id="kbStatusPanel" class="path-list"></div>
+        </div>
+        <div class="toolbar">
+          <button onclick="runIngest()">Ingest</button>
+          <button class="secondary" onclick="runLint()">Lint</button>
+        </div>
+        <div id="ingestStatus" class="status"></div>
+        <div id="ingestOutput" class="stack"></div>
+        <div id="lintStatus" class="status"></div>
+        <div id="lintOutput" class="stack"></div>
+
         <div>
           <h2>LLM Settings</h2>
           <p class="tiny">OpenAI-compatible, Gemini, and Ollama are supported. Store API keys in environment variables and put only the variable name here. Fallback order uses profile ids.</p>
@@ -414,11 +470,30 @@ INDEX_HTML = """<!doctype html>
 
   <script>
     async function boot() {
+      await loadStatus();
       await loadSettings();
     }
 
     function status(id, text) {
       document.getElementById(id).textContent = text || "";
+    }
+
+    async function loadStatus() {
+      const response = await fetch("/api/status");
+      const data = await response.json();
+      const root = document.getElementById("kbStatusPanel");
+      root.innerHTML = "";
+      const rows = [
+        ["KB", data.root_dir],
+        ["Raw", (data.source_dirs || []).join("; ")],
+        ["Index", data.index_path],
+        ["Log", data.log_path]
+      ];
+      for (const [label, value] of rows) {
+        const div = document.createElement("div");
+        div.textContent = `${label}: ${value || ""}`;
+        root.appendChild(div);
+      }
     }
 
     function renderProfiles(profiles) {
@@ -518,7 +593,7 @@ INDEX_HTML = """<!doctype html>
       for (const item of data.results || []) {
         const div = document.createElement("div");
         div.className = "result";
-        div.innerHTML = `<h3>${escapeHtml(item.title)}</h3><div class="meta">${escapeHtml(item.kind)} 繚 ${escapeHtml(item.rel_path)} 繚 score ${item.score}</div><div>${escapeHtml(item.snippet)}</div>`;
+        div.innerHTML = `<h3>${escapeHtml(item.title)}</h3><div class="meta">${escapeHtml(item.kind)} / ${escapeHtml(item.rel_path)} / score ${item.score}</div><div>${escapeHtml(item.snippet)}</div>`;
         root.appendChild(div);
       }
       status("searchStatus", `${(data.results || []).length} result(s).`);
@@ -545,7 +620,7 @@ INDEX_HTML = """<!doctype html>
       }
       const meta = document.createElement("div");
       meta.className = "result";
-      meta.innerHTML = `<h3>${escapeHtml(data.title || "Answer")}</h3><div class="meta">${data.saved_path ? escapeHtml(data.saved_path) : "not saved"}${data.llm ? ` 繚 ${escapeHtml(data.llm.profile_id)} / ${escapeHtml(data.llm.model)}` : ""}</div>`;
+      meta.innerHTML = `<h3>${escapeHtml(data.title || "Answer")}</h3><div class="meta">${data.saved_path ? escapeHtml(data.saved_path) : "not saved"}${data.llm ? ` / ${escapeHtml(data.llm.profile_id)} / ${escapeHtml(data.llm.model)}` : ""}</div>`;
       root.appendChild(meta);
       const answer = document.createElement("div");
       answer.className = "mono";
@@ -554,10 +629,56 @@ INDEX_HTML = """<!doctype html>
       if ((data.follow_up_questions || []).length) {
         const follow = document.createElement("div");
         follow.className = "result";
-        follow.innerHTML = `<h3>Follow-up Questions</h3>${data.follow_up_questions.map((item) => `<div>??${escapeHtml(item)}</div>`).join("")}`;
+        follow.innerHTML = `<h3>Follow-up Questions</h3>${data.follow_up_questions.map((item) => `<div>- ${escapeHtml(item)}</div>`).join("")}`;
         root.appendChild(follow);
       }
       status("queryStatus", "Answer ready.");
+    }
+
+    async function runIngest() {
+      status("ingestStatus", "Ingesting...");
+      const response = await fetch("/api/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}"
+      });
+      const data = await response.json();
+      const root = document.getElementById("ingestOutput");
+      root.innerHTML = "";
+      if (data.error) {
+        status("ingestStatus", data.error);
+        return;
+      }
+      const summary = document.createElement("div");
+      summary.className = "result";
+      summary.innerHTML = `<h3>Ingest Summary</h3><div class="meta">sources ${data.source_count} / raw copies ${data.copied_raw_count} / source notes ${data.source_note_count}</div><div class="tiny">${escapeHtml(data.index_path || "")}</div>`;
+      root.appendChild(summary);
+      status("ingestStatus", "Ingest complete.");
+    }
+
+    async function runLint() {
+      status("lintStatus", "Linting...");
+      const response = await fetch("/api/lint", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}"
+      });
+      const data = await response.json();
+      const root = document.getElementById("lintOutput");
+      root.innerHTML = "";
+      if (data.error) {
+        status("lintStatus", data.error);
+        return;
+      }
+      const summary = document.createElement("div");
+      summary.className = "result";
+      if (data.passed) {
+        summary.innerHTML = "<h3>Lint Passed</h3><div class=\"meta\">No warnings found.</div>";
+      } else {
+        summary.innerHTML = `<h3>Lint Warnings</h3>${(data.warnings || []).map((item) => `<div>${escapeHtml(item)}</div>`).join("")}`;
+      }
+      root.appendChild(summary);
+      status("lintStatus", data.passed ? "Lint passed." : `${(data.warnings || []).length} warning(s).`);
     }
 
     async function runSync() {
@@ -578,12 +699,12 @@ INDEX_HTML = """<!doctype html>
       }
       const summary = document.createElement("div");
       summary.className = "result";
-      summary.innerHTML = `<h3>Sync Summary</h3><div class="meta">processed ${data.processed_sources} source(s) 繚 created ${data.created_pages} 繚 updated ${data.updated_pages}</div>`;
+      summary.innerHTML = `<h3>Sync Summary</h3><div class="meta">processed ${data.processed_sources} source(s) / created ${data.created_pages} / updated ${data.updated_pages}</div>`;
       root.appendChild(summary);
       for (const page of data.pages || []) {
         const item = document.createElement("div");
         item.className = "result";
-        item.innerHTML = `<h3>${escapeHtml(page.name)}</h3><div class="meta">${escapeHtml(page.kind)} 繚 ${escapeHtml(page.action)} 繚 ${escapeHtml(page.path)}</div>`;
+        item.innerHTML = `<h3>${escapeHtml(page.name)}</h3><div class="meta">${escapeHtml(page.kind)} / ${escapeHtml(page.action)} / ${escapeHtml(page.path)}</div>`;
         root.appendChild(item);
       }
       status("syncStatus", "Sync complete.");

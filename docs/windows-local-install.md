@@ -39,6 +39,11 @@ The installer writes the active config to:
 %APPDATA%\LMIT-2\wiki-only.toml
 ```
 
+If that config is missing when `LMIT-2 Wiki Console` starts, the launcher opens
+folder pickers and recreates it before starting the server. This keeps custom
+install/data locations working even if the install-time initialization step was
+skipped or interrupted.
+
 Generated wiki files use short ASCII storage names. Original long filenames stay
 in manifest/source-note metadata and are not reused as internal KB filenames.
 
@@ -48,9 +53,13 @@ Start Menu shortcuts:
 
 - `LMIT-2 Wiki Console`: starts the local web UI and opens
   `http://127.0.0.1:8765`
-- `LMIT-2 Ingest Now`: imports current LMIT-1 raw Markdown
-- `LMIT-2 Sync Now`: runs the LLM-driven topic/entity update flow
-- `LMIT-2 Lint Now`: validates the knowledge-base structure
+- `LMIT-2 CLI Help`: opens the command-line help for advanced/manual use
+
+Use the web UI for day-to-day actions:
+
+- `Ingest`: imports current LMIT-1 raw Markdown
+- `Sync`: runs the LLM-driven topic/entity update flow
+- `Lint`: validates the knowledge-base structure
 
 ## Scheduled Tasks
 
@@ -87,8 +96,8 @@ Then open:
 http://127.0.0.1:8765
 ```
 
-If the UI still does not appear, check that the installer created
-`%APPDATA%\LMIT-2\wiki-only.toml` and that port `8765` is free on the machine.
+If the UI still does not appear, check that port `8765` is free on the machine.
+Launcher logs are written under `%APPDATA%\LMIT-2\logs`.
 
 Confirm that long LMIT-1 filenames are visible in `manifest.json` as original
 paths, while files under `knowledge_base/raw/` and `knowledge_base/wiki/` have

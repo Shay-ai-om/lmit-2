@@ -43,12 +43,13 @@ def test_inno_installer_defines_shortcuts_config_init_and_uninstall_cleanup():
 
     assert "LMIT-2 Wiki Console" in text
     assert "LMIT-2 CLI Help" in text
-    assert "LMIT-2 Ingest Now" in text
-    assert "LMIT-2 Sync Now" in text
     assert "init-windows-install.ps1" in text
     assert "remove-scheduled-tasks.ps1" in text
     assert "GetKnowledgeBaseRoot" in text
     assert "GetRawSourceDir" in text
+    assert "LMIT-2 Ingest Now" not in text
+    assert "LMIT-2 Sync Now" not in text
+    assert "LMIT-2 Lint Now" not in text
 
 
 def test_windows_task_scripts_register_and_remove_scheduled_tasks():
@@ -57,6 +58,7 @@ def test_windows_task_scripts_register_and_remove_scheduled_tasks():
     remove_text = (scripts_dir / "remove-scheduled-tasks.ps1").read_text(encoding="utf-8")
     start_text = (scripts_dir / "start-console.ps1").read_text(encoding="utf-8")
     init_text = (scripts_dir / "init-windows-install.ps1").read_text(encoding="utf-8")
+    common_text = (scripts_dir / "config-common.ps1").read_text(encoding="utf-8")
 
     assert "Register-ScheduledTask" in install_text
     assert "LMIT-2 Wiki Ingest" in install_text
@@ -64,6 +66,7 @@ def test_windows_task_scripts_register_and_remove_scheduled_tasks():
     assert "LMIT-2 Wiki Lint" in install_text
     assert "Unregister-ScheduledTask" in remove_text
     assert "127.0.0.1:8765" in start_text
-    assert "UTF8Encoding($false)" in init_text
-    assert "WriteAllText" in init_text
-    assert "if ($LASTEXITCODE -ne 0)" in init_text
+    assert "Ensure-LmitWikiConfig" in start_text
+    assert "UTF8Encoding($false)" in common_text
+    assert "WriteAllText" in common_text
+    assert "Invoke-LmitWikiInit" in init_text

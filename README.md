@@ -18,6 +18,8 @@ The primary deployment target is now a local Windows install:
 - The installer asks for a knowledge-base folder and the LMIT-1 `output/raw`
   source folder.
 - The web UI binds to `127.0.0.1:8765` by default.
+- The web UI runs `ingest`, `sync`, and `lint` from one place and shows the
+  configured KB/source paths.
 - Optional Windows scheduled tasks run `ingest`, `sync`, and `lint`.
 
 Build the Windows package from the repository root:
@@ -35,9 +37,7 @@ If Inno Setup is not installed yet, build only the PyInstaller executable:
 The installer creates Start Menu entries for:
 
 - `LMIT-2 Wiki Console`
-- `LMIT-2 Ingest Now`
-- `LMIT-2 Sync Now`
-- `LMIT-2 Lint Now`
+- `LMIT-2 CLI Help`
 
 See [docs/windows-local-install.md](docs/windows-local-install.md) for the full
 local install flow and manual verification checklist.
