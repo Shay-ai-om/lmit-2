@@ -1,5 +1,5 @@
 #define AppName "LMIT-2 Wiki"
-#define AppVersion "0.1.4"
+#define AppVersion "0.1.5"
 #define AppPublisher "LMIT"
 
 [Setup]
@@ -18,13 +18,15 @@ SolidCompression=yes
 WizardStyle=modern
 
 [Tasks]
-Name: "schedule"; Description: "Create Windows scheduled ingest, sync, and lint tasks"; GroupDescription: "Automation:"; Flags: checkedonce
+Name: "schedule"; Description: "Create Windows scheduled ingest, sync, and lint tasks"; GroupDescription: "Automation:"; Flags: unchecked
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
 
 [Files]
 Source: "..\..\dist\lmit-wiki\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
 Source: "scripts\*.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
+Source: "env.example"; DestDir: "{app}"; DestName: ".env.example"; Flags: ignoreversion
 Source: "..\..\config\wiki-only.windows.example.toml"; DestDir: "{app}\config"; Flags: ignoreversion
+Source: "..\..\docs\web-ui-guide.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\LMIT-2 Wiki Console"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\start-console.ps1"" -InstallDir ""{app}"" -ConfigPath ""{userappdata}\LMIT-2\wiki-only.toml"""
@@ -38,33 +40,14 @@ Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Fil
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\remove-scheduled-tasks.ps1"""; Flags: runhidden waituntilterminated
 
 [Code]
-var
-  DataPage: TInputDirWizardPage;
-
-procedure InitializeWizard;
-begin
-  DataPage := CreateInputDirPage(
-    wpSelectDir,
-    'Choose LMIT-2 data folders',
-    'Select the local knowledge base folder and the LMIT-1 raw Markdown folder.',
-    'LMIT-2 stores its generated wiki in the knowledge base folder. The raw source folder is read-only input from LMIT-1.',
-    False,
-    ''
-  );
-  DataPage.Add('Knowledge base folder:');
-  DataPage.Add('LMIT-1 raw Markdown folder:');
-  DataPage.Values[0] := ExpandConstant('{userdocs}\LMIT-2\knowledge_base');
-  DataPage.Values[1] := ExpandConstant('{userdocs}\LMIT\output\raw');
-end;
-
 function GetKnowledgeBaseRoot(Param: string): string;
 begin
-  Result := DataPage.Values[0];
+  Result := ExpandConstant('{userdocs}\LMIT-2\knowledge_base');
 end;
 
 function GetRawSourceDir(Param: string): string;
 begin
-  Result := DataPage.Values[1];
+  Result := ExpandConstant('{userdocs}\LMIT\output\raw');
 end;
 
 function GetInstallTasks(Param: string): string;

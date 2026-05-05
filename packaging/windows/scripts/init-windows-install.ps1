@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory=$true)][string]$KnowledgeBaseRoot,
     [Parameter(Mandatory=$true)][string]$RawSourceDir,
     [Parameter(Mandatory=$true)][string]$ConfigPath,
-    [bool]$InstallTasks = $true
+    [bool]$InstallTasks = $false
 )
 
 $ErrorActionPreference = "Stop"

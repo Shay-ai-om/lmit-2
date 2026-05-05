@@ -15,12 +15,13 @@ The primary deployment target is now a local Windows install:
 
 - PyInstaller builds `lmit-wiki.exe`.
 - Inno Setup packages that executable into `LMIT-2-Wiki-Setup.exe`.
-- The installer asks for a knowledge-base folder and the LMIT-1 `output/raw`
-  source folder.
+- The installer creates a default local config; the web UI is where users review
+  or change the knowledge-base folder and LMIT-1 `output/raw` source folder.
 - The web UI binds to `127.0.0.1:8765` by default.
 - The web UI runs `ingest`, `sync`, and `lint` from one place and shows the
   configured KB/source paths.
-- Optional Windows scheduled tasks run `ingest`, `sync`, and `lint`.
+- Optional Windows scheduled tasks run `ingest`, `sync`, and `lint`; they are not
+  selected by default on first install.
 
 Build the Windows package from the repository root:
 
@@ -40,7 +41,8 @@ The installer creates Start Menu entries for:
 - `LMIT-2 CLI Help`
 
 See [docs/windows-local-install.md](docs/windows-local-install.md) for the full
-local install flow and manual verification checklist.
+local install flow and manual verification checklist. See
+[docs/web-ui-guide.md](docs/web-ui-guide.md) for the Web UI operation guide.
 
 ## Long Filename Safety
 
@@ -110,7 +112,12 @@ Supported providers:
 
 Runtime settings live in `knowledge_base/.wiki_runtime.json`. The settings file
 stores environment variable names such as `OPENAI_API_KEY` and `GEMINI_API_KEY`,
-not API key values. Put actual keys in user or process environment variables.
+not API key values. Put actual keys in user/process environment variables or, in
+the Windows packaged app, in a `.env` file beside `lmit-wiki.exe`.
+
+The default local profiles include Ollama and LM Studio. LM Studio uses the
+OpenAI-compatible API at `http://localhost:1234/v1` and can run without an API
+key when served on localhost.
 
 LMIT-2 classifies source visibility during ingest:
 

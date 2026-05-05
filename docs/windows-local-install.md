@@ -27,22 +27,19 @@ dist/installer/LMIT-2-Wiki-Setup.exe
 
 ## Installer Flow
 
-The installer asks for:
-
-- knowledge base folder, where LMIT-2 writes `manifest.json`, source notes, and
-  wiki pages
-- LMIT-1 raw Markdown folder, usually `...\LMIT\output\raw`
-
-The installer writes the active config to:
+The installer writes a default active config to:
 
 ```text
 %APPDATA%\LMIT-2\wiki-only.toml
 ```
 
-If that config is missing when `LMIT-2 Wiki Console` starts, the launcher opens
-folder pickers and recreates it before starting the server. This keeps custom
-install/data locations working even if the install-time initialization step was
-skipped or interrupted.
+The installer no longer asks for the knowledge-base folder or the LMIT-1 raw
+Markdown folder. Open `LMIT-2 Wiki Console`, then use the web UI fields
+`Knowledge Base Path` and `Raw Source Paths` to review or change those paths.
+
+If the config is missing when `LMIT-2 Wiki Console` starts, the launcher
+recreates it with default Documents paths before starting the server. The paths
+can still be changed from the web UI after startup.
 
 Generated wiki files use short ASCII storage names. Original long filenames stay
 in manifest/source-note metadata and are not reused as internal KB filenames.
@@ -61,9 +58,13 @@ Use the web UI for day-to-day actions:
 - `Sync`: runs the LLM-driven topic/entity update flow
 - `Lint`: validates the knowledge-base structure
 
+See [web-ui-guide.md](web-ui-guide.md) for the current Web UI operation guide.
+
 ## Scheduled Tasks
 
-When selected during install, these current-user tasks are created:
+The scheduled-task option is intentionally unchecked by default. First-run users
+should confirm paths, run ingest once, and configure LLM profiles before enabling
+automation. When selected during install, these current-user tasks are created:
 
 ```text
 LMIT-2 Wiki Ingest
@@ -78,6 +79,21 @@ The default intervals are:
 - lint: every 1440 minutes
 
 Uninstall runs `remove-scheduled-tasks.ps1` to unregister those tasks.
+
+## API Keys
+
+LLM Settings stores environment variable names, not secret values. The app reads
+keys from normal Windows environment variables first. If a key is not found
+there, the packaged app also reads a `.env` file in the install folder, for
+example:
+
+```text
+OPENAI_API_KEY=sk-...
+GEMINI_API_KEY=...
+```
+
+The installer includes `.env.example` as a template. Copy or rename it to `.env`
+and fill in only the variables you use.
 
 ## Manual Verification
 

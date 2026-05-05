@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import sys
 
 from lmit_wiki.config import default_config
 from lmit_wiki.builder import init_wiki
@@ -78,6 +79,113 @@ def test_openai_compatible_profile_resolves_key_from_configured_env(
 
     assert completion.content == "ok"
     assert captured["headers"]["Authorization"] == "Bearer sk-from-env"
+
+
+def test_openai_compatible_profile_resolves_key_from_dotenv_file(
+    tmp_path,
+    monkeypatch,
+):
+    cfg = default_config(tmp_path)
+    init_wiki(cfg)
+    save_runtime_settings(
+        cfg,
+        {
+            "active_profile": "openai",
+            "fallback_order": ["openai"],
+            "profiles": [
+                {
+                    "id": "openai",
+                    "provider": "openai_compatible",
+                    "label": "OpenAI",
+                    "base_url": "https://api.openai.com/v1",
+                    "model": "gpt-4.1-mini",
+                    "api_key_env": "CUSTOM_OPENAI_KEY",
+                    "enabled": True,
+                }
+            ],
+        },
+    )
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "CUSTOM_OPENAI_KEY=sk-from-dotenv\nGEMINI_API_KEY='gemini-from-dotenv'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("CUSTOM_OPENAI_KEY", raising=False)
+    monkeypatch.setenv("LMIT_WIKI_DOTENV", str(dotenv))
+    captured: dict[str, object] = {}
+
+    def fake_post_json(url, headers, payload, *, timeout_seconds):
+        captured["headers"] = headers
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr("lmit_wiki.runtime._post_json", fake_post_json)
+
+    completion = invoke_text_completion(
+        cfg,
+        [{"role": "user", "content": "hello"}],
+        purpose="dotenv secret test",
+    )
+
+    assert completion.content == "ok"
+    assert captured["headers"]["Authorization"] == "Bearer sk-from-dotenv"
+
+
+def test_local_openai_compatible_profile_can_omit_api_key(
+    tmp_path,
+    monkeypatch,
+):
+    cfg = default_config(tmp_path)
+    init_wiki(cfg)
+    save_runtime_settings(
+        cfg,
+        {
+            "active_profile": "lm-studio",
+            "fallback_order": ["lm-studio"],
+            "profiles": [
+                {
+                    "id": "lm-studio",
+                    "provider": "openai_compatible",
+                    "label": "LM Studio",
+                    "base_url": "http://localhost:1234/v1",
+                    "model": "local-model",
+                    "api_key_env": "",
+                    "enabled": True,
+                }
+            ],
+        },
+    )
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    captured: dict[str, object] = {}
+
+    def fake_post_json(url, headers, payload, *, timeout_seconds):
+        captured["url"] = url
+        captured["headers"] = headers
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr("lmit_wiki.runtime._post_json", fake_post_json)
+
+    completion = invoke_text_completion(
+        cfg,
+        [{"role": "user", "content": "hello"}],
+        purpose="lm studio local test",
+    )
+
+    assert completion.content == "ok"
+    assert captured["url"] == "http://localhost:1234/v1/chat/completions"
+    assert "Authorization" not in captured["headers"]
+
+
+def test_packaged_dotenv_path_is_install_folder(tmp_path, monkeypatch):
+    import lmit_wiki.runtime as runtime
+
+    exe = tmp_path / "LMIT-2 Wiki" / "lmit-wiki.exe"
+    monkeypatch.setenv("LMIT_WIKI_DOTENV", "")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe))
+
+    paths = runtime._dotenv_candidate_paths()
+
+    assert paths[0] == exe.parent / ".env"
 
 
 def test_wiki_settings_ui_uses_api_key_env_field():

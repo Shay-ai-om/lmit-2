@@ -24,7 +24,7 @@ serve_host = "127.0.0.1"
 serve_port = 8765
 
 [windows.task_schedule]
-enabled = true
+enabled = false
 ingest_interval_minutes = 60
 sync_interval_minutes = 240
 lint_interval_minutes = 1440

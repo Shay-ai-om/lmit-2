@@ -229,6 +229,6 @@ def wiki_sync_command(args: argparse.Namespace) -> int:
 
 def wiki_serve_command(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
-    serve_wiki_ui(cfg, host=args.host, port=args.port)
+    serve_wiki_ui(cfg, config_path=args.config, host=args.host, port=args.port)
     return 0
 

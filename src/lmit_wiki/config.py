@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+import json
 import tomllib
 
 
@@ -180,6 +181,67 @@ def load_config(path: Path | None = None) -> AppConfig:
     return AppConfig(wiki=wiki, wiki_ingest=ingest, wiki_runtime=runtime, windows=windows)
 
 
+def write_local_config(
+    path: Path,
+    *,
+    root_dir: Path,
+    source_dirs: Iterable[Path],
+    serve_host: str = "127.0.0.1",
+    serve_port: int = 8765,
+    auto_sync_on_ingest: bool = False,
+    search_limit: int = 8,
+    task_schedule: WindowsTaskScheduleConfig | None = None,
+) -> AppConfig:
+    root = root_dir.expanduser().resolve()
+    sources = tuple(source.expanduser().resolve() for source in source_dirs)
+    if not sources:
+        raise ValueError("source_dirs must contain at least one path")
+    task = task_schedule or WindowsTaskScheduleConfig(
+        enabled=False,
+        ingest_interval_minutes=60,
+        sync_interval_minutes=240,
+        lint_interval_minutes=1440,
+    )
+
+    text = "\n".join(
+        [
+            "[wiki]",
+            f"root_dir = {_toml_string(root)}",
+            f"raw_dir = {_toml_string(root / 'raw')}",
+            f"sources_dir = {_toml_string(root / 'wiki' / 'sources')}",
+            f"topics_dir = {_toml_string(root / 'wiki' / 'topics')}",
+            f"entities_dir = {_toml_string(root / 'wiki' / 'entities')}",
+            f"queries_dir = {_toml_string(root / 'wiki' / 'queries')}",
+            f"schema_dir = {_toml_string(root / 'schema')}",
+            f"log_path = {_toml_string(root / 'wiki' / 'log.md')}",
+            f"index_path = {_toml_string(root / 'wiki' / 'index.md')}",
+            "",
+            "[wiki_ingest]",
+            "source_dirs = [",
+            *[f"  {_toml_string(source)}," for source in sources],
+            "]",
+            "",
+            "[wiki_runtime]",
+            f"settings_path = {_toml_string(root / '.wiki_runtime.json')}",
+            f"state_path = {_toml_string(root / '.wiki_state.json')}",
+            f"auto_sync_on_ingest = {_toml_bool(auto_sync_on_ingest)}",
+            f"search_limit = {int(search_limit)}",
+            f"serve_host = {_toml_string(serve_host)}",
+            f"serve_port = {int(serve_port)}",
+            "",
+            "[windows.task_schedule]",
+            f"enabled = {_toml_bool(task.enabled)}",
+            f"ingest_interval_minutes = {int(task.ingest_interval_minutes)}",
+            f"sync_interval_minutes = {int(task.sync_interval_minutes)}",
+            f"lint_interval_minutes = {int(task.lint_interval_minutes)}",
+            "",
+        ]
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return load_config(path)
+
+
 def _resolve_path(value: object, default: Path, base: Path) -> Path:
     if value is None or str(value).strip() == "":
         return default
@@ -195,3 +257,11 @@ def _resolve_paths(values: object, default: Iterable[Path], base: Path) -> tuple
     if not isinstance(values, list):
         raise ValueError("source_dirs must be a list")
     return tuple(_resolve_path(value, Path(str(value)), base) for value in values)
+
+
+def _toml_string(value: str | Path) -> str:
+    return json.dumps(str(value).replace("\\", "/"), ensure_ascii=False)
+
+
+def _toml_bool(value: bool) -> str:
+    return "true" if value else "false"

@@ -3,11 +3,12 @@
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 import json
 import os
 import re
+import sys
 
 from lmit_wiki.config import AppConfig
 from lmit_wiki.path_safety import safe_write_text
@@ -85,6 +86,7 @@ def default_runtime_settings_payload() -> dict[str, Any]:
         "active_profile": "ollama-local",
         "fallback_order": [
             "ollama-local",
+            "lm-studio-local",
             "openai-compatible",
             "gemini",
         ],
@@ -95,6 +97,17 @@ def default_runtime_settings_payload() -> dict[str, Any]:
                 "label": "Local Ollama",
                 "base_url": "http://localhost:11434/api",
                 "model": "llama3.1",
+                "api_key_env": "",
+                "enabled": False,
+                "temperature": 0.2,
+                "timeout_seconds": 120,
+            },
+            {
+                "id": "lm-studio-local",
+                "provider": "openai_compatible",
+                "label": "LM Studio Local",
+                "base_url": "http://localhost:1234/v1",
+                "model": "local-model",
                 "api_key_env": "",
                 "enabled": False,
                 "temperature": 0.2,
@@ -383,15 +396,15 @@ def _profile_from_payload(payload: dict[str, Any]) -> LLMProfile:
     model = str(payload.get("model") or "").strip()
     api_key_env = str(payload.get("api_key_env") or "").strip()
     legacy_api_key = str(payload.get("api_key") or "").strip()
-    if not api_key_env:
-        if provider == "openai_compatible":
-            api_key_env = "OPENAI_API_KEY"
-        elif provider == "gemini":
-            api_key_env = "GEMINI_API_KEY"
     if not base_url:
         raise RuntimeSettingsError(f"profile {profile_id} is missing base_url")
     if not model:
         raise RuntimeSettingsError(f"profile {profile_id} is missing model")
+    if not api_key_env:
+        if provider == "openai_compatible" and not _is_local_base_url(base_url):
+            api_key_env = "OPENAI_API_KEY"
+        elif provider == "gemini":
+            api_key_env = "GEMINI_API_KEY"
 
     return LLMProfile(
         profile_id=profile_id,
@@ -419,14 +432,14 @@ def _invoke_profile(profile: LLMProfile, messages: list[dict[str, str]]) -> str:
 
 def _invoke_openai_compatible(profile: LLMProfile, messages: list[dict[str, str]]) -> str:
     api_key = _resolved_api_key(profile)
-    if not api_key:
+    if profile.api_key_env and not api_key:
         raise RuntimeSettingsError(f"profile {profile.profile_id} is missing an API key")
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     data = _post_json(
         _openai_chat_url(profile.base_url),
-        {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers,
         {
             "model": profile.model,
             "messages": messages,
@@ -534,6 +547,11 @@ def _openai_chat_url(base_url: str) -> str:
     return normalized + "/chat/completions"
 
 
+def _is_local_base_url(base_url: str) -> bool:
+    hostname = urlparse(base_url).hostname
+    return hostname in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
 def _ollama_chat_url(base_url: str) -> str:
     normalized = base_url.rstrip("/")
     if normalized.endswith("/chat") or normalized.endswith("/api/chat"):
@@ -555,14 +573,72 @@ def _gemini_generate_url(base_url: str, model: str) -> str:
 
 def _resolved_api_key(profile: LLMProfile) -> str:
     if profile.api_key_env:
-        return os.environ.get(profile.api_key_env, "")
+        return _environment_secret(profile.api_key_env)
     if profile.api_key:
         return profile.api_key
     if profile.provider == "openai_compatible":
-        return os.environ.get("OPENAI_API_KEY", "")
+        return _environment_secret("OPENAI_API_KEY")
     if profile.provider == "gemini":
-        return os.environ.get("GEMINI_API_KEY", "")
+        return _environment_secret("GEMINI_API_KEY")
     return ""
+
+
+def _environment_secret(name: str) -> str:
+    if not name:
+        return ""
+    value = os.environ.get(name)
+    if value:
+        return value
+    return _dotenv_values().get(name, "")
+
+
+def _dotenv_values() -> dict[str, str]:
+    values: dict[str, str] = {}
+    for path in _dotenv_candidate_paths():
+        if not path.exists() or not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8-sig", errors="ignore").splitlines():
+            key, value = _parse_dotenv_line(line)
+            if key and key not in values:
+                values[key] = value
+    return values
+
+
+def _dotenv_candidate_paths() -> list[Path]:
+    paths: list[Path] = []
+    configured = os.environ.get("LMIT_WIKI_DOTENV")
+    if configured:
+        paths.append(Path(configured).expanduser())
+    if getattr(sys, "frozen", False):
+        paths.append(Path(sys.executable).resolve().parent / ".env")
+    paths.append(Path.cwd() / ".env")
+
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        resolved = path.resolve()
+        if resolved not in seen:
+            unique.append(resolved)
+            seen.add(resolved)
+    return unique
+
+
+def _parse_dotenv_line(line: str) -> tuple[str, str]:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return "", ""
+    if stripped.startswith("export "):
+        stripped = stripped[7:].lstrip()
+    key, separator, raw_value = stripped.partition("=")
+    if not separator:
+        return "", ""
+    key = key.strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+        return "", ""
+    value = raw_value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1]
+    return key, value
 
 
 def _flatten_message_content(content: Any) -> str:

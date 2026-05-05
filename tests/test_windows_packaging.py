@@ -14,7 +14,7 @@ def test_windows_config_template_is_localhost_and_schedules_tasks():
     assert cfg.wiki_runtime.serve_host == "127.0.0.1"
     assert cfg.wiki_runtime.serve_port == 8765
     assert cfg.wiki_ingest.source_dirs
-    assert cfg.windows.task_schedule.enabled is True
+    assert cfg.windows.task_schedule.enabled is False
     assert cfg.windows.task_schedule.ingest_interval_minutes == 60
 
 
@@ -47,6 +47,11 @@ def test_inno_installer_defines_shortcuts_config_init_and_uninstall_cleanup():
     assert "remove-scheduled-tasks.ps1" in text
     assert "GetKnowledgeBaseRoot" in text
     assert "GetRawSourceDir" in text
+    assert "CreateInputDirPage" not in text
+    assert "Flags: checkedonce" not in text
+    assert "Flags: unchecked" in text
+    assert "web-ui-guide.md" in text
+    assert 'DestName: ".env.example"' in text
     assert "LMIT-2 Ingest Now" not in text
     assert "LMIT-2 Sync Now" not in text
     assert "LMIT-2 Lint Now" not in text
@@ -69,4 +74,7 @@ def test_windows_task_scripts_register_and_remove_scheduled_tasks():
     assert "Ensure-LmitWikiConfig" in start_text
     assert "UTF8Encoding($false)" in common_text
     assert "WriteAllText" in common_text
+    assert "Select-LmitFolder" not in common_text
+    assert "FolderBrowserDialog" not in common_text
     assert "Invoke-LmitWikiInit" in init_text
+    assert "[bool]$InstallTasks = $false" in init_text
