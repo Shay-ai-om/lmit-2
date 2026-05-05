@@ -4,7 +4,7 @@ from io import BytesIO
 import json
 
 from lmit_wiki.config import default_config, load_config, write_local_config
-from lmit_wiki.server import WikiWebApp
+from lmit_wiki.server import INDEX_HTML, ThreadingWSGIServer, WikiWebApp
 
 
 def test_web_ui_exposes_status_ingest_and_lint(tmp_path):
@@ -18,6 +18,8 @@ def test_web_ui_exposes_status_ingest_and_lint(tmp_path):
     status_payload = _call_json(app, "GET", "/api/status")
     assert status_payload["root_dir"] == str(cfg.wiki.root_dir)
     assert status_payload["source_dirs"] == [str(raw_dir)]
+    assert status_payload["root_exists"] is None
+    assert status_payload["source_dir_status"][0]["exists"] is None
 
     ingest_payload = _call_json(app, "POST", "/api/ingest")
     assert ingest_payload["source_count"] == 1
@@ -89,15 +91,23 @@ def test_web_ui_links_manual_and_exposes_path_controls(tmp_path):
     app = WikiWebApp(cfg)
 
     html = _call_html(app, "GET", "/")
-    assert 'href="/manual"' in html
+    assert 'id="manualPanel"' in html
+    assert "toggleManual()" in html
+    assert 'href="/manual"' not in html
     assert "Knowledge Base Path" in html
     assert "Raw Source Paths" in html
     assert "Save Paths" in html
+    assert "This did not run Ingest or call an LLM." in html
     assert html.index("<h2>Auto Sync</h2>") < html.index("<h2>LLM Settings</h2>")
 
     manual = _call_html(app, "GET", "/manual")
     assert "LMIT-2 Web UI 操作教學" in manual
     assert "Save Paths" in manual
+
+
+def test_web_ui_uses_threaded_server_and_nonblocking_status():
+    assert ThreadingWSGIServer.daemon_threads is True
+    assert 'item.exists ? "yes" : "no"' not in INDEX_HTML
 
 
 def _call_json(app: WikiWebApp, method: str, path: str, payload: dict | None = None) -> dict:

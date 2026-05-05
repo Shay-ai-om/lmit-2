@@ -2,8 +2,10 @@
 
 from http import HTTPStatus
 from pathlib import Path
+from socketserver import ThreadingMixIn
+from threading import RLock
 from urllib.parse import parse_qs
-from wsgiref.simple_server import make_server
+from wsgiref.simple_server import WSGIServer, make_server
 import json
 
 from lmit_wiki.builder import ingest_wiki, init_wiki, lint_wiki
@@ -20,6 +22,10 @@ from lmit_wiki.runtime import (
 from lmit_wiki.search import search_result_payload, search_wiki
 
 
+class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    daemon_threads = True
+
+
 def serve_wiki_ui(
     cfg: AppConfig,
     *,
@@ -30,7 +36,7 @@ def serve_wiki_ui(
     host = host or cfg.wiki_runtime.serve_host
     port = port or cfg.wiki_runtime.serve_port
     app = WikiWebApp(cfg, config_path=config_path)
-    with make_server(host, port, app) as server:
+    with make_server(host, port, app, server_class=ThreadingWSGIServer) as server:
         print(f"Wiki UI: http://{host}:{port}")
         server.serve_forever()
 
@@ -39,6 +45,7 @@ class WikiWebApp:
     def __init__(self, cfg: AppConfig, *, config_path: Path | None = None) -> None:
         self.cfg = cfg
         self.config_path = config_path.resolve() if config_path is not None else None
+        self._cfg_lock = RLock()
 
     def __call__(self, environ, start_response):
         method = environ["REQUEST_METHOD"].upper()
@@ -60,21 +67,23 @@ class WikiWebApp:
                     raise ValueError("Knowledge base path is required.")
                 if not source_dirs:
                     raise ValueError("At least one raw source path is required.")
-                self.cfg = write_local_config(
+                old_cfg = self._current_cfg()
+                new_cfg = write_local_config(
                     self.config_path,
                     root_dir=Path(root_text),
                     source_dirs=source_dirs,
-                    serve_host=self.cfg.wiki_runtime.serve_host,
-                    serve_port=self.cfg.wiki_runtime.serve_port,
-                    auto_sync_on_ingest=self.cfg.wiki_runtime.auto_sync_on_ingest,
-                    search_limit=self.cfg.wiki_runtime.search_limit,
-                    task_schedule=self.cfg.windows.task_schedule,
+                    serve_host=old_cfg.wiki_runtime.serve_host,
+                    serve_port=old_cfg.wiki_runtime.serve_port,
+                    auto_sync_on_ingest=old_cfg.wiki_runtime.auto_sync_on_ingest,
+                    search_limit=old_cfg.wiki_runtime.search_limit,
+                    task_schedule=old_cfg.windows.task_schedule,
                 )
-                init_wiki(self.cfg)
-                self.cfg = load_config(self.config_path)
+                init_wiki(new_cfg)
+                with self._cfg_lock:
+                    self.cfg = load_config(self.config_path)
                 return self._json(start_response, self._status_payload())
             if method == "POST" and path == "/api/ingest":
-                result = ingest_wiki(self.cfg)
+                result = ingest_wiki(self._current_cfg())
                 return self._json(
                     start_response,
                     {
@@ -86,7 +95,7 @@ class WikiWebApp:
                     },
                 )
             if method == "POST" and path == "/api/lint":
-                warnings = lint_wiki(self.cfg)
+                warnings = lint_wiki(self._current_cfg())
                 return self._json(
                     start_response,
                     {
@@ -98,13 +107,13 @@ class WikiWebApp:
                 query = parse_qs(environ.get("QUERY_STRING", "")).get("q", [""])[0]
                 results = [
                     search_result_payload(item)
-                    for item in search_wiki(self.cfg, query, include_raw=True)
+                    for item in search_wiki(self._current_cfg(), query, include_raw=True)
                 ]
                 return self._json(start_response, {"results": results})
             if method == "POST" and path == "/api/query":
                 payload = self._read_json(environ)
                 answer = answer_wiki_query(
-                    self.cfg,
+                    self._current_cfg(),
                     str(payload.get("question", "")).strip(),
                     save=bool(payload.get("save", True)),
                 )
@@ -133,7 +142,7 @@ class WikiWebApp:
                 payload = self._read_json(environ)
                 raw_limit = payload.get("limit")
                 limit = int(raw_limit) if raw_limit not in (None, "") else None
-                result = auto_sync_wiki(self.cfg, limit=limit)
+                result = auto_sync_wiki(self._current_cfg(), limit=limit)
                 return self._json(
                     start_response,
                     {
@@ -152,14 +161,14 @@ class WikiWebApp:
                     },
                 )
             if method == "GET" and path == "/api/settings":
-                settings = load_runtime_settings(self.cfg)
+                settings = load_runtime_settings(self._current_cfg())
                 return self._json(
                     start_response,
                     runtime_settings_public_payload(settings),
                 )
             if method == "POST" and path == "/api/settings/defaults":
                 settings = save_runtime_settings(
-                    self.cfg,
+                    self._current_cfg(),
                     default_runtime_settings_payload(),
                 )
                 return self._json(
@@ -168,9 +177,10 @@ class WikiWebApp:
                 )
             if method == "POST" and path == "/api/settings":
                 payload = self._read_json(environ)
-                existing = load_runtime_settings(self.cfg)
+                cfg = self._current_cfg()
+                existing = load_runtime_settings(cfg)
                 merged = merge_runtime_settings_payload(existing, payload)
-                settings = save_runtime_settings(self.cfg, merged)
+                settings = save_runtime_settings(cfg, merged)
                 return self._json(
                     start_response,
                     runtime_settings_public_payload(settings),
@@ -217,25 +227,30 @@ class WikiWebApp:
         return [body]
 
     def _status_payload(self) -> dict[str, object]:
+        cfg = self._current_cfg()
         source_dirs = [
             {
                 "path": str(path),
-                "exists": path.exists(),
+                "exists": None,
             }
-            for path in self.cfg.wiki_ingest.source_dirs
+            for path in cfg.wiki_ingest.source_dirs
         ]
         return {
             "config_path": str(self.config_path) if self.config_path is not None else None,
-            "root_dir": str(self.cfg.wiki.root_dir),
-            "root_exists": self.cfg.wiki.root_dir.exists(),
+            "root_dir": str(cfg.wiki.root_dir),
+            "root_exists": None,
             "source_dirs": [item["path"] for item in source_dirs],
             "source_dir_status": source_dirs,
-            "index_path": str(self.cfg.wiki.index_path),
-            "index_exists": self.cfg.wiki.index_path.exists(),
-            "log_path": str(self.cfg.wiki.log_path),
-            "serve_host": self.cfg.wiki_runtime.serve_host,
-            "serve_port": self.cfg.wiki_runtime.serve_port,
+            "index_path": str(cfg.wiki.index_path),
+            "index_exists": None,
+            "log_path": str(cfg.wiki.log_path),
+            "serve_host": cfg.wiki_runtime.serve_host,
+            "serve_port": cfg.wiki_runtime.serve_port,
         }
+
+    def _current_cfg(self) -> AppConfig:
+        with self._cfg_lock:
+            return self.cfg
 
 
 def _payload_source_dirs(value: object) -> list[Path]:
@@ -475,6 +490,30 @@ INDEX_HTML = """<!doctype html>
       font-size: 13px;
     }
 
+    .manual-panel {
+      display: none;
+      margin-bottom: 16px;
+    }
+
+    .manual-panel.open {
+      display: block;
+    }
+
+    .manual-panel ol, .manual-panel ul {
+      margin: 0 0 0 20px;
+      padding: 0;
+    }
+
+    .manual-panel li {
+      margin: 6px 0;
+    }
+
+    .manual-panel code {
+      background: #eef2f1;
+      border-radius: 4px;
+      padding: 2px 5px;
+    }
+
     @media (max-width: 980px) {
       .grid { grid-template-columns: 1fr; }
       .row { grid-template-columns: 1fr; }
@@ -490,7 +529,29 @@ INDEX_HTML = """<!doctype html>
         <h1>LMIT-2 Wiki Console</h1>
         <p>Config: <span id="configPath">loading...</span></p>
       </div>
-      <a class="button-link secondary" href="/manual" target="_blank">Web UI Guide</a>
+      <button class="secondary" onclick="toggleManual()">Web UI Guide</button>
+    </section>
+
+    <section id="manualPanel" class="panel manual-panel">
+      <h2>Web UI Guide</h2>
+      <div class="row">
+        <div>
+          <h3>First Run</h3>
+          <ol>
+            <li>Set <code>Knowledge Base Path</code> to the folder where LMIT-2 writes the wiki.</li>
+            <li>Set <code>Raw Source Paths</code> to the LMIT-1 raw Markdown folder. Use one line per source.</li>
+            <li>Click <code>Save Paths</code>, then run <code>Ingest</code>.</li>
+          </ol>
+        </div>
+        <div>
+          <h3>Troubleshooting</h3>
+          <ul>
+            <li><code>Save Paths</code> does not run Ingest or use any LLM.</li>
+            <li>If a button times out, check the message shown under that button.</li>
+            <li>Launcher logs are under <code>%APPDATA%\\LMIT-2\\logs</code>.</li>
+          </ul>
+        </div>
+      </div>
     </section>
 
     <div class="grid">
@@ -693,50 +754,77 @@ INDEX_HTML = """<!doctype html>
       document.getElementById(id).textContent = text || "";
     }
 
+    function toggleManual() {
+      document.getElementById("manualPanel").classList.toggle("open");
+    }
+
+    function requestJson(url, options = {}, timeoutSeconds = 20) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutSeconds * 1000);
+      return fetch(url, { ...options, signal: controller.signal })
+        .then(async (response) => {
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok || data.error) {
+            throw new Error(data.error || `${response.status} ${response.statusText}`);
+          }
+          return data;
+        })
+        .catch((error) => {
+          if (error.name === "AbortError") {
+            throw new Error(`Request timed out after ${timeoutSeconds} seconds.`);
+          }
+          throw error;
+        })
+        .finally(() => clearTimeout(timer));
+    }
+
     async function loadStatus() {
-      const response = await fetch("/api/status");
-      const data = await response.json();
-      document.getElementById("configPath").textContent = data.config_path || "not saved";
-      document.getElementById("kbRootInput").value = data.root_dir || "";
-      document.getElementById("sourceDirsInput").value = (data.source_dirs || []).join("\\n");
-      const root = document.getElementById("kbStatusPanel");
-      root.innerHTML = "";
-      const rows = [
-        ["KB exists", data.root_exists ? "yes" : "no"],
-        ["Raw exists", (data.source_dir_status || []).map((item) => `${item.path} (${item.exists ? "yes" : "no"})`).join("; ")],
-        ["Index", data.index_path],
-        ["Log", data.log_path]
-      ];
-      for (const [label, value] of rows) {
-        const div = document.createElement("div");
-        div.textContent = `${label}: ${value || ""}`;
-        root.appendChild(div);
+      try {
+        const data = await requestJson("/api/status", {}, 10);
+        document.getElementById("configPath").textContent = data.config_path || "not saved";
+        document.getElementById("kbRootInput").value = data.root_dir || "";
+        document.getElementById("sourceDirsInput").value = (data.source_dirs || []).join("\\n");
+        const root = document.getElementById("kbStatusPanel");
+        root.innerHTML = "";
+        const rows = [
+          ["KB", data.root_dir || ""],
+          ["Raw", (data.source_dir_status || []).map((item) => item.path).join("; ")],
+          ["Index", data.index_path],
+          ["Log", data.log_path]
+        ];
+        for (const [label, value] of rows) {
+          const div = document.createElement("div");
+          div.textContent = `${label}: ${value || ""}`;
+          root.appendChild(div);
+        }
+      } catch (error) {
+        document.getElementById("configPath").textContent = "status unavailable";
+        status("pathStatus", `Status load failed: ${error.message}`);
       }
     }
 
     async function savePaths() {
-      status("pathStatus", "Saving paths...");
-      const sourceDirs = document.getElementById("sourceDirsInput").value
-        .split(/\\r?\\n|;/)
-        .map((item) => item.trim())
-        .filter(Boolean);
-      const payload = {
-        root_dir: document.getElementById("kbRootInput").value.trim(),
-        source_dirs: sourceDirs
-      };
-      const response = await fetch("/api/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-      const data = await response.json();
-      if (data.error) {
-        status("pathStatus", data.error);
-        return;
+      try {
+        status("pathStatus", "Saving paths...");
+        const sourceDirs = document.getElementById("sourceDirsInput").value
+          .split(/\\r?\\n|;/)
+          .map((item) => item.trim())
+          .filter(Boolean);
+        const payload = {
+          root_dir: document.getElementById("kbRootInput").value.trim(),
+          source_dirs: sourceDirs
+        };
+        await requestJson("/api/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        }, 20);
+        await loadStatus();
+        await loadSettings();
+        status("pathStatus", "Paths saved. This did not run Ingest or call an LLM.");
+      } catch (error) {
+        status("pathStatus", `Save failed: ${error.message}`);
       }
-      await loadStatus();
-      await loadSettings();
-      status("pathStatus", "Paths saved.");
     }
 
     function renderProfiles(profiles) {
@@ -823,71 +911,68 @@ INDEX_HTML = """<!doctype html>
     }
 
     async function loadSettings() {
-      status("settingsStatus", "Loading settings...");
-      const response = await fetch("/api/settings");
-      const data = await response.json();
-      if (data.error) {
+      try {
+        status("settingsStatus", "Loading settings...");
+        const data = await requestJson("/api/settings", {}, 10);
+        document.getElementById("activeProfile").value = data.active_profile || "";
+        document.getElementById("fallbackOrder").value = (data.fallback_order || []).join(", ");
+        renderProfiles(data.profiles || []);
+        status("settingsStatus", "Settings loaded.");
+      } catch (error) {
         renderProfiles([]);
-        status("settingsStatus", data.error);
-        return;
+        status("settingsStatus", `Settings load failed: ${error.message}`);
       }
-      document.getElementById("activeProfile").value = data.active_profile || "";
-      document.getElementById("fallbackOrder").value = (data.fallback_order || []).join(", ");
-      renderProfiles(data.profiles || []);
-      status("settingsStatus", "Settings loaded.");
     }
 
     async function restoreDefaults() {
-      status("settingsStatus", "Restoring default profiles...");
-      const response = await fetch("/api/settings/defaults", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}"
-      });
-      const data = await response.json();
-      if (data.error) {
-        status("settingsStatus", data.error);
-        return;
+      try {
+        status("settingsStatus", "Restoring default profiles...");
+        const data = await requestJson("/api/settings/defaults", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}"
+        }, 20);
+        document.getElementById("activeProfile").value = data.active_profile || "";
+        document.getElementById("fallbackOrder").value = (data.fallback_order || []).join(", ");
+        renderProfiles(data.profiles || []);
+        status("settingsStatus", "Default profiles restored.");
+      } catch (error) {
+        status("settingsStatus", `Restore failed: ${error.message}`);
       }
-      document.getElementById("activeProfile").value = data.active_profile || "";
-      document.getElementById("fallbackOrder").value = (data.fallback_order || []).join(", ");
-      renderProfiles(data.profiles || []);
-      status("settingsStatus", "Default profiles restored.");
     }
 
     async function saveSettings() {
-      status("settingsStatus", "Saving settings...");
-      const profiles = collectProfiles({ includeIncomplete: true });
-      const missingId = profiles.find((profile) => !profile.id);
-      if (missingId) {
-        status("settingsStatus", "Every profile needs a Profile ID before saving.");
-        return;
-      }
-      const seen = new Set();
-      for (const profile of profiles) {
-        if (seen.has(profile.id)) {
-          status("settingsStatus", `Duplicate profile id: ${profile.id}`);
+      try {
+        status("settingsStatus", "Saving settings...");
+        const profiles = collectProfiles({ includeIncomplete: true });
+        const missingId = profiles.find((profile) => !profile.id);
+        if (missingId) {
+          status("settingsStatus", "Every profile needs a Profile ID before saving.");
           return;
         }
-        seen.add(profile.id);
+        const seen = new Set();
+        for (const profile of profiles) {
+          if (seen.has(profile.id)) {
+            status("settingsStatus", `Duplicate profile id: ${profile.id}`);
+            return;
+          }
+          seen.add(profile.id);
+        }
+        const payload = {
+          active_profile: document.getElementById("activeProfile").value.trim() || null,
+          fallback_order: document.getElementById("fallbackOrder").value.split(",").map((item) => item.trim()).filter(Boolean),
+          profiles
+        };
+        const data = await requestJson("/api/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        }, 20);
+        renderProfiles(data.profiles || []);
+        status("settingsStatus", "Settings saved. This did not call an LLM.");
+      } catch (error) {
+        status("settingsStatus", `Save failed: ${error.message}`);
       }
-      const payload = {
-        active_profile: document.getElementById("activeProfile").value.trim() || null,
-        fallback_order: document.getElementById("fallbackOrder").value.split(",").map((item) => item.trim()).filter(Boolean),
-        profiles
-      };
-      const response = await fetch("/api/settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-      const data = await response.json();
-      if (data.error) {
-        status("settingsStatus", data.error);
-        return;
-      }
-      renderProfiles(data.profiles || []);
-      status("settingsStatus", "Settings saved.");
     }
 
     async function runSearch() {
@@ -1119,6 +1204,8 @@ MANUAL_HTML = """<!doctype html>
         <li>Web UI 打不開時，先確認 <code>127.0.0.1:8765</code> 沒被其他程式佔用。</li>
         <li>啟動器錯誤記錄位於 <code>%APPDATA%\\LMIT-2\\logs</code>。</li>
         <li>Ingest 找不到資料時，檢查 <code>Raw Source Paths</code> 是否指向 LMIT-1 的 <code>output/raw</code>。</li>
+        <li><code>Save Paths</code> 只儲存路徑與初始化 KB，不會執行 Ingest，也不會呼叫任何 LLM。</li>
+        <li>如果按鈕顯示 timeout，通常是 server 未回應、路徑位於慢速/離線磁碟，或另一個長時間操作仍在執行。</li>
       </ul>
     </section>
   </main>

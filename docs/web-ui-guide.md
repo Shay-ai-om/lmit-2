@@ -37,3 +37,5 @@
 - Web UI 打不開時，先確認 `127.0.0.1:8765` 沒被其他程式佔用。
 - 啟動器錯誤記錄位於 `%APPDATA%\LMIT-2\logs`。
 - Ingest 找不到資料時，檢查 `Raw Source Paths` 是否指向 LMIT-1 的 `output/raw`。
+- `Save Paths` 只儲存路徑與初始化 KB，不會執行 Ingest，也不會呼叫任何 LLM。
+- 如果按鈕顯示 timeout，通常是 server 未回應、路徑位於慢速/離線磁碟，或另一個長時間操作仍在執行。
