@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,7 +31,12 @@ class AutoSyncResult:
     pages: tuple[SyncedPage, ...]
 
 
-def auto_sync_wiki(cfg: AppConfig, *, limit: int | None = None) -> AutoSyncResult:
+def auto_sync_wiki(
+    cfg: AppConfig,
+    *,
+    limit: int | None = None,
+    progress: Callable[[dict[str, object]], None] | None = None,
+) -> AutoSyncResult:
     init_wiki(cfg)
     manifest_path = cfg.wiki.root_dir / "manifest.json"
     if not manifest_path.exists():
@@ -47,6 +53,20 @@ def auto_sync_wiki(cfg: AppConfig, *, limit: int | None = None) -> AutoSyncResul
     ]
     if limit is not None:
         pending = pending[:limit]
+    total_sources = len(pending)
+    _report_progress(
+        progress,
+        stage="prepare",
+        total_sources=total_sources,
+        processed_sources=0,
+        created_pages=0,
+        updated_pages=0,
+        message=(
+            "No sources need sync."
+            if total_sources == 0
+            else f"Preparing to sync {total_sources} source(s)."
+        ),
+    )
 
     pages: list[SyncedPage] = []
     catalog = _page_catalog(cfg)
@@ -54,7 +74,21 @@ def auto_sync_wiki(cfg: AppConfig, *, limit: int | None = None) -> AutoSyncResul
         "topic": "topics",
         "entity": "entities",
     }
-    for record in pending:
+    for index, record in enumerate(pending, start=1):
+        created_so_far = sum(1 for page in pages if page.action == "created")
+        updated_so_far = sum(1 for page in pages if page.action == "updated")
+        _report_progress(
+            progress,
+            stage="source",
+            total_sources=total_sources,
+            source_index=index,
+            processed_sources=index - 1,
+            created_pages=created_so_far,
+            updated_pages=updated_so_far,
+            current_source_title=str(record.get("title") or "Untitled"),
+            current_relative_path=str(record.get("relative_path") or ""),
+            message=f"Syncing source {index} of {total_sources}: {record.get('title', 'Untitled')}",
+        )
         extracted = _extract_source_updates(cfg, record, catalog)
         for kind, key in kind_keys.items():
             for item in extracted.get(key, []):
@@ -62,6 +96,20 @@ def auto_sync_wiki(cfg: AppConfig, *, limit: int | None = None) -> AutoSyncResul
                 pages.append(synced)
                 catalog[kind].append(item["name"])
         state["processed_sources"][str(record["relative_path"])] = str(record.get("content_hash", ""))
+        created_so_far = sum(1 for page in pages if page.action == "created")
+        updated_so_far = sum(1 for page in pages if page.action == "updated")
+        _report_progress(
+            progress,
+            stage="source_complete",
+            total_sources=total_sources,
+            source_index=index,
+            processed_sources=index,
+            created_pages=created_so_far,
+            updated_pages=updated_so_far,
+            current_source_title=str(record.get("title") or "Untitled"),
+            current_relative_path=str(record.get("relative_path") or ""),
+            message=f"Finished source {index} of {total_sources}: {record.get('title', 'Untitled')}",
+        )
 
     _save_state(cfg, state)
     if pages:
@@ -73,6 +121,19 @@ def auto_sync_wiki(cfg: AppConfig, *, limit: int | None = None) -> AutoSyncResul
 
     created = sum(1 for page in pages if page.action == "created")
     updated = sum(1 for page in pages if page.action == "updated")
+    _report_progress(
+        progress,
+        stage="complete",
+        total_sources=total_sources,
+        processed_sources=len(pending),
+        created_pages=created,
+        updated_pages=updated,
+        message=(
+            "Sync finished with no wiki page changes."
+            if not pages
+            else f"Sync finished. Created {created} page(s) and updated {updated} page(s)."
+        ),
+    )
     return AutoSyncResult(
         processed_sources=len(pending),
         created_pages=created,
@@ -328,4 +389,12 @@ def _save_state(cfg: AppConfig, state: dict[str, object]) -> None:
 
 def _relative_link(from_dir: Path, to_path: Path) -> str:
     return Path(os.path.relpath(to_path, from_dir)).as_posix()
+
+
+def _report_progress(
+    progress: Callable[[dict[str, object]], None] | None,
+    **payload: object,
+) -> None:
+    if progress is not None:
+        progress(dict(payload))
 

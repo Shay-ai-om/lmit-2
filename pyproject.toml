@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lmit-wiki"
-version = "0.1.9"
+version = "0.1.10"
 description = "Wiki-only knowledge-base layer for raw Markdown produced by LMIT."
 readme = "README.md"
 requires-python = ">=3.11"

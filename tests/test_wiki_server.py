@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from io import BytesIO
 import json
+import time
+from threading import Event
 
+from lmit_wiki.query import QueryAnswer
 from lmit_wiki.config import default_config, load_config, write_local_config
+from lmit_wiki.auto import AutoSyncResult, SyncedPage
 from lmit_wiki.server import INDEX_HTML, ThreadingWSGIServer, WikiWebApp
 
 
@@ -55,8 +59,8 @@ def test_web_ui_exposes_llm_profile_controls_and_default_restore(tmp_path):
 
     html = _call_html(app, "GET", "/")
     assert "Add Ollama" in html
-    assert "Add LM Studio" in html
     assert "Add LM Studio REST" in html
+    assert "Add LiteLLM" in html
     assert "Add OpenAI" in html
     assert "Add Gemini" in html
     assert "Restore Defaults" in html
@@ -66,18 +70,18 @@ def test_web_ui_exposes_llm_profile_controls_and_default_restore(tmp_path):
     profile_ids = [profile["id"] for profile in defaults["profiles"]]
     assert profile_ids == [
         "ollama-local",
-        "lm-studio-local",
         "lm-studio-rest",
+        "litellm-local",
         "openai-compatible",
         "gemini",
     ]
-    lm_studio = defaults["profiles"][1]
-    lm_studio_rest = defaults["profiles"][2]
-    assert lm_studio["base_url"] == "http://localhost:1234/v1"
+    lm_studio_rest = defaults["profiles"][1]
+    litellm = defaults["profiles"][2]
     assert lm_studio_rest["base_url"] == "http://localhost:1234/api/v1"
-    assert lm_studio["timeout_seconds"] == 300
+    assert litellm["base_url"] == "http://localhost:4000"
     assert lm_studio_rest["timeout_seconds"] == 300
-    assert lm_studio["api_key_env"] == ""
+    assert litellm["timeout_seconds"] == 300
+    assert litellm["api_key_env"] == "LITELLM_API_KEY"
     assert defaults["active_profile"] == "ollama-local"
 
 
@@ -130,6 +134,7 @@ def test_web_ui_links_manual_and_exposes_path_controls(tmp_path):
     assert "Save Paths" in manual
     assert "Fetch Models" in manual
     assert "LM Studio REST" in manual
+    assert "LiteLLM" in manual
 
 
 def test_document_route_serves_wiki_markdown_and_blocks_missing_paths(tmp_path):
@@ -159,6 +164,130 @@ def test_document_route_serves_wiki_markdown_and_blocks_missing_paths(tmp_path):
         expect_ok=False,
     )
     assert "error" in error_payload
+
+
+def test_web_ui_sync_runs_as_background_job(tmp_path, monkeypatch):
+    cfg = default_config(tmp_path)
+    app = WikiWebApp(cfg)
+    started = Event()
+    release = Event()
+
+    def fake_sync(cfg_arg, *, limit=None, progress=None):
+        assert cfg_arg == cfg
+        assert limit == 2
+        if progress is not None:
+            progress(
+                {
+                    "message": "Preparing to sync 2 source(s).",
+                    "total_sources": 2,
+                    "processed_sources": 0,
+                    "created_pages": 0,
+                    "updated_pages": 0,
+                }
+            )
+            progress(
+                {
+                    "message": "Syncing source 1 of 2: Alpha",
+                    "total_sources": 2,
+                    "processed_sources": 0,
+                    "created_pages": 0,
+                    "updated_pages": 0,
+                    "current_source_title": "Alpha",
+                    "current_relative_path": "wiki/sources/alpha.md",
+                }
+            )
+        started.set()
+        assert release.wait(2), "background sync never resumed"
+        return AutoSyncResult(
+            processed_sources=2,
+            created_pages=1,
+            updated_pages=1,
+            pages=(
+                SyncedPage(
+                    name="Alpha Topic",
+                    kind="topic",
+                    path=cfg.wiki.topics_dir / "alpha-topic.md",
+                    action="created",
+                ),
+                SyncedPage(
+                    name="Alpha Entity",
+                    kind="entity",
+                    path=cfg.wiki.entities_dir / "alpha-entity.md",
+                    action="updated",
+                ),
+            ),
+        )
+
+    monkeypatch.setattr("lmit_wiki.server.auto_sync_wiki", fake_sync)
+
+    start_payload = _call_json(app, "POST", "/api/sync", {"limit": 2})
+    assert start_payload["started"] is True
+    job_id = start_payload["job"]["job_id"]
+    assert started.wait(1)
+
+    reused_payload = _call_json(app, "POST", "/api/sync", {"limit": 2})
+    assert reused_payload["started"] is False
+    assert reused_payload["job"]["job_id"] == job_id
+
+    running_payload = _call_json(app, "GET", "/api/sync", query_string=f"job_id={job_id}")
+    assert running_payload["job"]["status"] == "running"
+    assert running_payload["job"]["current_source_title"] == "Alpha"
+    assert running_payload["job"]["total_sources"] == 2
+
+    release.set()
+    deadline = time.time() + 2
+    completed_payload = running_payload
+    while time.time() < deadline:
+        completed_payload = _call_json(app, "GET", "/api/sync", query_string=f"job_id={job_id}")
+        if completed_payload["job"]["status"] == "completed":
+            break
+        time.sleep(0.05)
+
+    assert completed_payload["job"]["status"] == "completed"
+    assert completed_payload["job"]["processed_sources"] == 2
+    assert completed_payload["job"]["created_pages"] == 1
+    assert completed_payload["job"]["updated_pages"] == 1
+    assert completed_payload["job"]["pages"][0]["name"] == "Alpha Topic"
+
+
+def test_web_ui_streams_query_answer_chunks(tmp_path, monkeypatch):
+    cfg = default_config(tmp_path)
+    app = WikiWebApp(cfg)
+
+    def fake_stream_query(cfg_arg, question, *, save=True, on_chunk=None):
+        assert cfg_arg == cfg
+        assert question == "what changed?"
+        assert save is False
+        if on_chunk is not None:
+            on_chunk("# Changes\n\n")
+            on_chunk("The wiki changed. [S1]")
+        return QueryAnswer(
+            question=question,
+            title="Changes",
+            answer_markdown="# Changes\n\nThe wiki changed. [S1]",
+            follow_up_questions=("What should we update next?",),
+            search_results=(),
+            completion=None,
+            saved_path=None,
+        )
+
+    monkeypatch.setattr("lmit_wiki.server.stream_wiki_query_answer", fake_stream_query)
+
+    body = _call_text(
+        app,
+        "POST",
+        "/api/query/stream",
+        payload={"question": "what changed?", "save": False},
+        content_length=True,
+    )
+
+    events = [json.loads(line) for line in body.splitlines() if line.strip()]
+    assert events[0]["type"] == "start"
+    assert events[1] == {"type": "chunk", "text": "# Changes\n\n"}
+    assert events[2] == {"type": "chunk", "text": "The wiki changed. [S1]"}
+    assert events[3]["type"] == "done"
+    assert events[3]["title"] == "Changes"
+    assert events[3]["follow_up_questions"] == ["What should we update next?"]
 
 
 def test_web_ui_fetches_model_choices_for_supported_providers(tmp_path, monkeypatch):
@@ -218,9 +347,9 @@ def _call_json(
 
     response_body = b"".join(app(environ, start_response))
     if expect_ok:
-        assert str(captured["status"]).startswith("200 ")
+        assert str(captured["status"]).startswith("2")
     else:
-        assert not str(captured["status"]).startswith("200 ")
+        assert not str(captured["status"]).startswith("2")
     return json.loads(response_body.decode("utf-8"))
 
 
@@ -250,7 +379,10 @@ def _call_text(
     path: str,
     *,
     query_string: str = "",
+    payload: dict | None = None,
+    content_length: bool = False,
 ) -> str:
+    body = json.dumps(payload or {}).encode("utf-8") if method == "POST" else b""
     captured: dict[str, object] = {}
 
     def start_response(status: str, headers: list[tuple[str, str]]) -> None:
@@ -261,8 +393,8 @@ def _call_text(
         "REQUEST_METHOD": method,
         "PATH_INFO": path,
         "QUERY_STRING": query_string,
-        "CONTENT_LENGTH": "0",
-        "wsgi.input": BytesIO(b""),
+        "CONTENT_LENGTH": str(len(body)) if content_length else "0",
+        "wsgi.input": BytesIO(body),
     }
 
     response_body = b"".join(app(environ, start_response))

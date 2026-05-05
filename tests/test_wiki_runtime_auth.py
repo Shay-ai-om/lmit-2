@@ -265,15 +265,15 @@ def test_default_local_profile_timeout_is_upgraded_to_300_seconds(tmp_path):
     save_runtime_settings(
         cfg,
         {
-            "active_profile": "lm-studio-local",
-            "fallback_order": ["lm-studio-local", "lm-studio-rest"],
+            "active_profile": "litellm-local",
+            "fallback_order": ["litellm-local", "lm-studio-rest"],
             "profiles": [
                 {
-                    "id": "lm-studio-local",
+                    "id": "litellm-local",
                     "provider": "openai_compatible",
-                    "label": "LM Studio Local",
-                    "base_url": "http://localhost:1234/v1",
-                    "model": "local-model",
+                    "label": "LiteLLM",
+                    "base_url": "http://localhost:4000",
+                    "model": "gpt-5",
                     "enabled": True,
                     "timeout_seconds": 120,
                 },

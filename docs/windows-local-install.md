@@ -98,31 +98,34 @@ and fill in only the variables you use.
 
 ## LM Studio
 
-For the default LM Studio profile, `Base URL` should be
-`http://localhost:1234/v1` when LM Studio's Local Server is running on port
-1234. For the native REST profile, use `http://localhost:1234/api/v1`.
+LMIT-2 now keeps only the native LM Studio REST profile in the default Web UI.
+Use `http://localhost:1234/api/v1` when LM Studio's Local Server is running on
+port 1234.
 
 The `Model` field must use the id or key returned by the API, not necessarily
 the model name shown in the download list.
-
-Use `Fetch Models` in the Web UI or run:
-
-```powershell
-Invoke-RestMethod http://localhost:1234/v1/models | ConvertTo-Json -Depth 5
-```
-
-For the native REST profile:
 
 ```powershell
 Invoke-RestMethod http://localhost:1234/api/v1/models | ConvertTo-Json -Depth 5
 ```
 
-If the OpenAI-compatible profile lists models but chat requests still return
-HTTP 400, prefer the `LM Studio REST` profile. If either request is refused,
-start LM Studio's Local Server and confirm the port before changing LMIT-2
-settings.
+If that request is refused, start LM Studio's Local Server and confirm the port
+before changing LMIT-2 settings.
 
-Local LM Studio and Ollama profiles now default to `Timeout Seconds = 300`.
+## LiteLLM
+
+LiteLLM Proxy Server uses an OpenAI-style gateway. The official quick start
+shows the local proxy on:
+
+```text
+http://localhost:4000
+```
+
+Use that value for the default `LiteLLM` profile in the Web UI. If your proxy
+requires a master key, set it through an env var such as `LITELLM_API_KEY` and
+enter only the variable name in LMIT-2.
+
+Local LM Studio, LiteLLM, and Ollama profiles now default to `Timeout Seconds = 300`.
 If `Ask The Wiki` still fails with `timed out`, increase that value further for
 the active profile before retrying.
 

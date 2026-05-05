@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,7 +11,7 @@ from lmit_wiki.config import AppConfig
 from lmit_wiki.path_safety import ensure_within_root, safe_write_text
 from lmit_wiki.builder import append_log, init_wiki, refresh_index
 from lmit_wiki.policy import EXTERNAL_LLM_ALLOWED, llm_policy_for_sources
-from lmit_wiki.runtime import LLMCompletion, invoke_json_completion
+from lmit_wiki.runtime import LLMCompletion, invoke_json_completion, invoke_text_completion
 from lmit_wiki.search import SearchResult, search_wiki
 from lmit_wiki.text import hashed_slug, strip_frontmatter
 
@@ -105,6 +106,84 @@ def answer_wiki_query(
     )
 
 
+def stream_wiki_query_answer(
+    cfg: AppConfig,
+    question: str,
+    *,
+    save: bool = True,
+    on_chunk: Callable[[str], None] | None = None,
+) -> QueryAnswer:
+    init_wiki(cfg)
+    search_results = tuple(
+        search_wiki(
+            cfg,
+            question,
+            limit=cfg.wiki_runtime.search_limit,
+            include_raw=True,
+        )
+    )
+    if not search_results:
+        answer = QueryAnswer(
+            question=question,
+            title=_fallback_title(question),
+            answer_markdown=(
+                "No matching wiki pages, source notes, or raw sources were found for this question."
+            ),
+            follow_up_questions=(),
+            search_results=(),
+            completion=None,
+            saved_path=None,
+        )
+        if on_chunk is not None:
+            on_chunk(answer.answer_markdown)
+        if not save:
+            return answer
+        saved_path = _save_query_page(cfg, answer)
+        return QueryAnswer(
+            question=answer.question,
+            title=answer.title,
+            answer_markdown=answer.answer_markdown,
+            follow_up_questions=answer.follow_up_questions,
+            search_results=answer.search_results,
+            completion=None,
+            saved_path=saved_path,
+        )
+
+    completion = invoke_text_completion(
+        cfg,
+        _stream_query_messages(question, search_results),
+        purpose="wiki query",
+        llm_policy=_llm_policy_for_search_results(cfg, search_results),
+        on_chunk=on_chunk,
+    )
+    title, answer_markdown, follow_up_questions = _parse_streamed_query_response(
+        question,
+        completion.content,
+    )
+    answer = QueryAnswer(
+        question=question,
+        title=title,
+        answer_markdown=answer_markdown,
+        follow_up_questions=follow_up_questions,
+        search_results=search_results,
+        completion=completion,
+        saved_path=None,
+    )
+    if not save:
+        return answer
+
+    saved_path = _save_query_page(cfg, answer)
+    return QueryAnswer(
+        question=answer.question,
+        title=answer.title,
+        answer_markdown=answer.answer_markdown,
+        follow_up_questions=answer.follow_up_questions,
+        search_results=answer.search_results,
+        completion=answer.completion,
+        saved_path=saved_path,
+    )
+
+
 def _query_messages(question: str, search_results: tuple[SearchResult, ...]) -> list[dict[str, str]]:
     context_blocks: list[str] = []
     for index, result in enumerate(search_results, start=1):
@@ -170,6 +249,54 @@ def _llm_policy_for_search_results(
     if not matched_records:
         return EXTERNAL_LLM_ALLOWED
     return llm_policy_for_sources(matched_records)
+
+
+def _stream_query_messages(question: str, search_results: tuple[SearchResult, ...]) -> list[dict[str, str]]:
+    context_blocks: list[str] = []
+    for index, result in enumerate(search_results, start=1):
+        text = result.path.read_text(encoding="utf-8", errors="ignore")
+        body = strip_frontmatter(text).strip()
+        clipped = body[:1600].strip()
+        context_blocks.append(
+            "\n".join(
+                [
+                    f"[S{index}] {result.kind} | {result.title} | {result.rel_path}",
+                    clipped,
+                ]
+            )
+        )
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You maintain a persistent markdown wiki. "
+                "Answer only from the provided wiki context. "
+                "If the evidence is incomplete, say so explicitly. "
+                "Use citations like [S1], [S2] that refer only to the provided sources. "
+                "Respond in the same language as the user's question when practical. "
+                "Return markdown only. Do not wrap the answer in code fences. "
+                "Start with a single H1 title, then the answer body, then a heading named "
+                "'## Follow-up Questions' with zero or more bullet items."
+            ),
+        },
+        {
+            "role": "user",
+            "content": "\n\n".join(
+                [
+                    f"Question:\n{question}",
+                    "Context:",
+                    "\n\n".join(context_blocks),
+                    (
+                        "Format the response exactly like this:\n"
+                        "# Short title\n\n"
+                        "Answer in markdown with [S#] citations.\n\n"
+                        "## Follow-up Questions\n"
+                        "- Optional follow-up question"
+                    ),
+                ]
+            ),
+        },
+    ]
 
 
 def _save_query_page(cfg: AppConfig, answer: QueryAnswer) -> Path:
@@ -252,4 +379,47 @@ def _fallback_title(question: str) -> str:
 
 def _relative_link(from_dir: Path, to_path: Path) -> str:
     return Path(os.path.relpath(to_path, from_dir)).as_posix()
+
+
+def _parse_streamed_query_response(
+    question: str,
+    markdown: str,
+) -> tuple[str, str, tuple[str, ...]]:
+    text = markdown.strip()
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+        if text.lower().startswith("markdown"):
+            text = text[8:].lstrip()
+    lines = text.splitlines()
+
+    fallback_title = _fallback_title(question)
+    title = fallback_title
+    answer_lines: list[str] = []
+    follow_up_lines: list[str] = []
+    in_follow_ups = False
+
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if stripped.startswith("# ") and title == fallback_title:
+            title = stripped[2:].strip() or fallback_title
+            continue
+        if stripped.lower() == "## follow-up questions":
+            in_follow_ups = True
+            continue
+        if in_follow_ups:
+            follow_up_lines.append(line)
+        else:
+            answer_lines.append(line)
+
+    answer_markdown = "\n".join(answer_lines).strip()
+    if not answer_markdown:
+        answer_markdown = "No grounded answer was produced."
+
+    follow_up_questions = tuple(
+        item.lstrip("-* ").strip()
+        for item in follow_up_lines
+        if item.lstrip("-* ").strip() and item.lstrip("-* ").strip().lower() not in {"none", "n/a"}
+    )
+    return title, answer_markdown, follow_up_questions
 

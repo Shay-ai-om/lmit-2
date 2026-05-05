@@ -1,10 +1,14 @@
 ﻿from __future__ import annotations
 
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
+from queue import Queue
 from socketserver import ThreadingMixIn
-from threading import RLock
+from threading import RLock, Thread
 from urllib.parse import parse_qs, quote
+from uuid import uuid4
 from wsgiref.simple_server import WSGIServer, make_server
 import json
 
@@ -12,7 +16,7 @@ from lmit_wiki.builder import ingest_wiki, init_wiki, lint_wiki
 from lmit_wiki.config import AppConfig, load_config, write_local_config
 from lmit_wiki.auto import auto_sync_wiki
 from lmit_wiki.path_safety import ensure_within_root
-from lmit_wiki.query import answer_wiki_query
+from lmit_wiki.query import answer_wiki_query, stream_wiki_query_answer
 from lmit_wiki.runtime import (
     default_runtime_settings_payload,
     fetch_model_choices,
@@ -26,6 +30,137 @@ from lmit_wiki.search import search_result_payload, search_wiki
 
 class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
     daemon_threads = True
+
+
+@dataclass
+class SyncJobState:
+    job_id: str
+    requested_limit: int | None
+    status: str = "queued"
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    started_at: str | None = None
+    finished_at: str | None = None
+    message: str = "Queued."
+    total_sources: int | None = None
+    processed_sources: int = 0
+    current_source_title: str | None = None
+    current_relative_path: str | None = None
+    created_pages: int = 0
+    updated_pages: int = 0
+    pages: list[dict[str, str]] = field(default_factory=list)
+    error: str | None = None
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "job_id": self.job_id,
+            "requested_limit": self.requested_limit,
+            "status": self.status,
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "message": self.message,
+            "total_sources": self.total_sources,
+            "processed_sources": self.processed_sources,
+            "current_source_title": self.current_source_title,
+            "current_relative_path": self.current_relative_path,
+            "created_pages": self.created_pages,
+            "updated_pages": self.updated_pages,
+            "pages": self.pages,
+            "error": self.error,
+        }
+
+
+class SyncJobManager:
+    def __init__(self) -> None:
+        self._lock = RLock()
+        self._jobs: dict[str, SyncJobState] = {}
+        self._latest_job_id: str | None = None
+        self._active_job_id: str | None = None
+
+    def start_job(self, cfg: AppConfig, *, limit: int | None = None) -> tuple[dict[str, object], bool]:
+        with self._lock:
+            if self._active_job_id is not None:
+                active = self._jobs.get(self._active_job_id)
+                if active is not None and active.status in {"queued", "running"}:
+                    return active.payload(), False
+            job = SyncJobState(job_id=uuid4().hex[:12], requested_limit=limit)
+            self._jobs[job.job_id] = job
+            self._latest_job_id = job.job_id
+            self._active_job_id = job.job_id
+        Thread(target=self._run_job, args=(job.job_id, cfg, limit), daemon=True).start()
+        return job.payload(), True
+
+    def get_job(self, job_id: str | None = None) -> dict[str, object] | None:
+        with self._lock:
+            target = job_id or self._latest_job_id
+            if target is None:
+                return None
+            job = self._jobs.get(target)
+            return job.payload() if job is not None else None
+
+    def _run_job(self, job_id: str, cfg: AppConfig, limit: int | None) -> None:
+        self._update_job(
+            job_id,
+            status="running",
+            started_at=_utc_now(),
+            message="Preparing sync job...",
+        )
+
+        def report_progress(update: dict[str, object]) -> None:
+            self._update_job(
+                job_id,
+                message=str(update.get("message") or "Sync running..."),
+                total_sources=_int_or_none(update.get("total_sources")),
+                processed_sources=_int_or_zero(update.get("processed_sources")),
+                current_source_title=_str_or_none(update.get("current_source_title")),
+                current_relative_path=_str_or_none(update.get("current_relative_path")),
+                created_pages=_int_or_zero(update.get("created_pages")),
+                updated_pages=_int_or_zero(update.get("updated_pages")),
+            )
+
+        try:
+            result = auto_sync_wiki(cfg, limit=limit, progress=report_progress)
+            self._update_job(
+                job_id,
+                status="completed",
+                finished_at=_utc_now(),
+                processed_sources=result.processed_sources,
+                created_pages=result.created_pages,
+                updated_pages=result.updated_pages,
+                message=(
+                    "Sync finished with no wiki page changes."
+                    if not result.pages
+                    else f"Sync finished. Created {result.created_pages} page(s) and updated {result.updated_pages} page(s)."
+                ),
+                pages=[
+                    {
+                        "name": page.name,
+                        "kind": page.kind,
+                        "path": str(page.path),
+                        "action": page.action,
+                    }
+                    for page in result.pages
+                ],
+            )
+        except Exception as exc:
+            self._update_job(
+                job_id,
+                status="failed",
+                finished_at=_utc_now(),
+                message="Sync failed.",
+                error=str(exc),
+            )
+        finally:
+            with self._lock:
+                if self._active_job_id == job_id:
+                    self._active_job_id = None
+
+    def _update_job(self, job_id: str, **changes: object) -> None:
+        with self._lock:
+            job = self._jobs[job_id]
+            for key, value in changes.items():
+                if value is not None or key in {"current_source_title", "current_relative_path", "error"}:
+                    setattr(job, key, value)
 
 
 def serve_wiki_ui(
@@ -48,6 +183,7 @@ class WikiWebApp:
         self.cfg = cfg
         self.config_path = config_path.resolve() if config_path is not None else None
         self._cfg_lock = RLock()
+        self._sync_jobs = SyncJobManager()
 
     def __call__(self, environ, start_response):
         method = environ["REQUEST_METHOD"].upper()
@@ -116,6 +252,10 @@ class WikiWebApp:
                         "warnings": warnings,
                     },
                 )
+            if method == "GET" and path == "/api/sync":
+                query = parse_qs(environ.get("QUERY_STRING", ""))
+                job = self._sync_jobs.get_job(query.get("job_id", [""])[0].strip() or None)
+                return self._json(start_response, {"job": job})
             if method == "GET" and path == "/api/search":
                 query = parse_qs(environ.get("QUERY_STRING", "")).get("q", [""])[0]
                 results = [
@@ -123,6 +263,16 @@ class WikiWebApp:
                     for item in search_wiki(self._current_cfg(), query, include_raw=True)
                 ]
                 return self._json(start_response, {"results": results})
+            if method == "POST" and path == "/api/query/stream":
+                payload = self._read_json(environ)
+                question = str(payload.get("question", "")).strip()
+                if not question:
+                    raise ValueError("Question is required.")
+                return self._stream_query(
+                    start_response,
+                    question=question,
+                    save=bool(payload.get("save", True)),
+                )
             if method == "POST" and path == "/api/query":
                 payload = self._read_json(environ)
                 answer = answer_wiki_query(
@@ -156,23 +306,14 @@ class WikiWebApp:
                 payload = self._read_json(environ)
                 raw_limit = payload.get("limit")
                 limit = int(raw_limit) if raw_limit not in (None, "") else None
-                result = auto_sync_wiki(self._current_cfg(), limit=limit)
+                job, started = self._sync_jobs.start_job(self._current_cfg(), limit=limit)
                 return self._json(
                     start_response,
                     {
-                        "processed_sources": result.processed_sources,
-                        "created_pages": result.created_pages,
-                        "updated_pages": result.updated_pages,
-                        "pages": [
-                            {
-                                "name": page.name,
-                                "kind": page.kind,
-                                "path": str(page.path),
-                                "action": page.action,
-                            }
-                            for page in result.pages
-                        ],
+                        "started": started,
+                        "job": job,
                     },
+                    status=HTTPStatus.ACCEPTED if started else HTTPStatus.OK,
                 )
             if method == "GET" and path == "/api/settings":
                 settings = load_runtime_settings(self._current_cfg())
@@ -277,6 +418,74 @@ class WikiWebApp:
         )
         return [encoded]
 
+    def _stream_query(
+        self,
+        start_response,
+        *,
+        question: str,
+        save: bool,
+    ):
+        queue: Queue[dict[str, object] | None] = Queue()
+        cfg = self._current_cfg()
+
+        def emit(payload: dict[str, object]) -> None:
+            queue.put(payload)
+
+        def worker() -> None:
+            try:
+                emit({"type": "start", "message": "Searching the wiki and starting the model..."})
+                answer = stream_wiki_query_answer(
+                    cfg,
+                    question,
+                    save=save,
+                    on_chunk=lambda chunk: emit({"type": "chunk", "text": chunk}),
+                )
+                emit(
+                    {
+                        "type": "done",
+                        "title": answer.title,
+                        "answer_markdown": answer.answer_markdown,
+                        "follow_up_questions": list(answer.follow_up_questions),
+                        "saved_path": str(answer.saved_path) if answer.saved_path else None,
+                        "search_results": [
+                            _search_result_payload(cfg, item)
+                            for item in answer.search_results
+                        ],
+                        "llm": (
+                            {
+                                "profile_id": answer.completion.profile_id,
+                                "provider": answer.completion.provider,
+                                "model": answer.completion.model,
+                            }
+                            if answer.completion is not None
+                            else None
+                        ),
+                    }
+                )
+            except Exception as exc:
+                emit({"type": "error", "error": str(exc)})
+            finally:
+                queue.put(None)
+
+        Thread(target=worker, daemon=True).start()
+
+        start_response(
+            f"{HTTPStatus.OK.value} {HTTPStatus.OK.phrase}",
+            [
+                ("Content-Type", "application/x-ndjson; charset=utf-8"),
+                ("Cache-Control", "no-cache"),
+            ],
+        )
+
+        def stream():
+            while True:
+                item = queue.get()
+                if item is None:
+                    break
+                yield (json.dumps(item, ensure_ascii=False) + "\n").encode("utf-8")
+
+        return stream()
+
     def _status_payload(self) -> dict[str, object]:
         cfg = self._current_cfg()
         source_dirs = [
@@ -354,6 +563,27 @@ def _resolve_document_path(cfg: AppConfig, rel_path: str) -> Path:
     return target
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _int_or_none(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    return int(value)
+
+
+def _int_or_zero(value: object) -> int:
+    if value in (None, ""):
+        return 0
+    return int(value)
+
+
+def _str_or_none(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
 INDEX_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -362,15 +592,15 @@ INDEX_HTML = """<!doctype html>
   <title>LMIT-2 Wiki Console</title>
   <style>
     :root {
-      --bg: #f4f6f5;
-      --panel: #ffffff;
+      --bg: #f6f1e8;
+      --panel: #fffaf2;
       --ink: #1e2430;
       --muted: #697281;
-      --line: #d7dedb;
-      --accent: #0f766e;
-      --accent-soft: #e2f2ef;
-      --warm: #b9472f;
-      --shadow: 0 10px 30px rgba(30, 36, 48, 0.06);
+      --line: #d8cbb8;
+      --accent: #136f63;
+      --accent-soft: #d9efe6;
+      --warm: #c05d33;
+      --shadow: 0 18px 50px rgba(30, 36, 48, 0.08);
       --radius: 8px;
     }
 
@@ -379,7 +609,10 @@ INDEX_HTML = """<!doctype html>
       margin: 0;
       font-family: "Segoe UI", "Noto Sans", sans-serif;
       color: var(--ink);
-      background: var(--bg);
+      background:
+        radial-gradient(circle at top left, rgba(19, 111, 99, 0.14), transparent 28%),
+        radial-gradient(circle at bottom right, rgba(192, 93, 51, 0.12), transparent 22%),
+        var(--bg);
     }
 
     .shell {
@@ -396,7 +629,7 @@ INDEX_HTML = """<!doctype html>
       padding: 16px 18px;
       border: 1px solid var(--line);
       border-radius: var(--radius);
-      background: var(--panel);
+      background: linear-gradient(135deg, rgba(255,250,242,0.96), rgba(236,248,243,0.96));
       box-shadow: var(--shadow);
       margin-bottom: 16px;
     }
@@ -444,7 +677,7 @@ INDEX_HTML = """<!doctype html>
       padding: 12px 14px;
       border-radius: 8px;
       border: 1px solid var(--line);
-      background: #fff;
+      background: rgba(255, 255, 255, 0.92);
       color: var(--ink);
       font: inherit;
     }
@@ -494,7 +727,7 @@ INDEX_HTML = """<!doctype html>
     .result, .profile {
       padding: 14px;
       border-radius: var(--radius);
-      background: #fff;
+      background: rgba(255, 255, 255, 0.94);
       border: 1px solid var(--line);
     }
 
@@ -512,7 +745,7 @@ INDEX_HTML = """<!doctype html>
     .mono {
       font-family: Consolas, "Courier New", monospace;
       white-space: pre-wrap;
-      background: #fff;
+      background: rgba(255, 255, 255, 0.94);
       border: 1px solid var(--line);
       border-radius: var(--radius);
       padding: 14px;
@@ -633,14 +866,17 @@ INDEX_HTML = """<!doctype html>
             <li>If no config exists yet, the launcher asks for the knowledge base and raw Markdown folders.</li>
             <li>Inside the Web UI, you can still edit <code>Knowledge Base Path</code> and <code>Raw Source Paths</code>.</li>
             <li>Click <code>Save Paths</code>, then run <code>Ingest</code>.</li>
-            <li>For LM Studio, start its Local Server, then use <code>Fetch Models</code> to fill the model id for either the OpenAI-compatible or REST profile.</li>
+            <li>For LM Studio REST or LiteLLM, start the local server or proxy first, then use <code>Fetch Models</code> to fill the model id.</li>
+            <li><code>Ask The Wiki</code> now streams live output, so once tokens start arriving the answer will keep filling in without waiting for one giant final response.</li>
           </ol>
         </div>
         <div>
           <h3>Troubleshooting</h3>
           <ul>
             <li><code>Save Paths</code> does not run Ingest or use any LLM.</li>
-            <li>If a button times out, check the message shown under that button.</li>
+            <li><code>Sync Now</code> runs in the background. Keep this page open to watch progress.</li>
+            <li>If a button stalls, check the message shown under that button.</li>
+            <li>If <code>Ask The Wiki</code> produces no live text at all, the current model may still be loading or the provider may not support streaming for that endpoint.</li>
             <li>Launcher logs are under <code>%APPDATA%\\LMIT-2\\logs</code>.</li>
           </ul>
         </div>
@@ -701,7 +937,7 @@ INDEX_HTML = """<!doctype html>
           <h2>Auto Sync</h2>
           <div class="toolbar">
             <input id="syncLimit" placeholder="Optional source limit">
-            <button onclick="runSync()">Sync Now</button>
+            <button id="syncButton" onclick="runSync()">Sync Now</button>
           </div>
         </div>
         <div id="syncStatus" class="status"></div>
@@ -720,13 +956,13 @@ INDEX_HTML = """<!doctype html>
           </label>
           <label class="field">
             <span>Fallback Order</span>
-            <input id="fallbackOrder" placeholder="ollama-local, lm-studio-local, lm-studio-rest, openai-compatible, gemini">
+            <input id="fallbackOrder" placeholder="ollama-local, lm-studio-rest, litellm-local, openai-compatible, gemini">
           </label>
         </div>
         <div class="toolbar">
           <button class="secondary" onclick="addProfile('ollama')">Add Ollama</button>
-          <button class="secondary" onclick="addProfile('lmstudio')">Add LM Studio</button>
           <button class="secondary" onclick="addProfile('lmstudioRest')">Add LM Studio REST</button>
+          <button class="secondary" onclick="addProfile('litellm')">Add LiteLLM</button>
           <button class="secondary" onclick="addProfile('openai')">Add OpenAI</button>
           <button class="secondary" onclick="addProfile('gemini')">Add Gemini</button>
           <button class="secondary" onclick="restoreDefaults()">Restore Defaults</button>
@@ -776,7 +1012,7 @@ INDEX_HTML = """<!doctype html>
       <div class="toolbar">
         <button class="secondary" onclick="fetchModels(this)">Fetch Models</button>
       </div>
-      <div class="tiny" data-field="model_hint">For LM Studio, start the Local Server first, then fetch models and use the returned id or key.</div>
+      <div class="tiny" data-field="model_hint">For LiteLLM or LM Studio REST, start the local proxy/server first, then fetch models and use the returned id.</div>
       <label class="field">
         <span>API Key Environment Variable</span>
         <input data-field="api_key_env" placeholder="OPENAI_API_KEY">
@@ -811,24 +1047,13 @@ INDEX_HTML = """<!doctype html>
       openai: {
         id: "openai-compatible",
         provider: "openai_compatible",
-        label: "OpenAI Compatible",
+        label: "OpenAI",
         base_url: "https://api.openai.com/v1",
         model: "gpt-4.1-mini",
         api_key_env: "OPENAI_API_KEY",
         enabled: false,
         temperature: 0.2,
         timeout_seconds: 120
-      },
-      lmstudio: {
-        id: "lm-studio-local",
-        provider: "openai_compatible",
-        label: "LM Studio Local",
-        base_url: "http://localhost:1234/v1",
-        model: "local-model",
-        api_key_env: "",
-        enabled: false,
-        temperature: 0.2,
-        timeout_seconds: 300
       },
       lmstudioRest: {
         id: "lm-studio-rest",
@@ -837,6 +1062,17 @@ INDEX_HTML = """<!doctype html>
         base_url: "http://localhost:1234/api/v1",
         model: "local-model",
         api_key_env: "",
+        enabled: false,
+        temperature: 0.2,
+        timeout_seconds: 300
+      },
+      litellm: {
+        id: "litellm-local",
+        provider: "openai_compatible",
+        label: "LiteLLM",
+        base_url: "http://localhost:4000",
+        model: "gpt-5",
+        api_key_env: "LITELLM_API_KEY",
         enabled: false,
         temperature: 0.2,
         timeout_seconds: 300
@@ -854,9 +1090,13 @@ INDEX_HTML = """<!doctype html>
       }
     };
 
+    let currentSyncJobId = null;
+    let syncPollTimer = null;
+
     async function boot() {
       await loadStatus();
       await loadSettings();
+      await loadSyncJob();
     }
 
     function status(id, text) {
@@ -956,7 +1196,7 @@ INDEX_HTML = """<!doctype html>
         node.querySelector('[data-field="base_url"]').value = profile.base_url || "";
         const apiKeyInput = node.querySelector('[data-field="api_key_env"]');
         apiKeyInput.value = profile.api_key_env || "";
-        apiKeyInput.placeholder = apiKeyPlaceholder(profile.provider || "ollama");
+        apiKeyInput.placeholder = apiKeyPlaceholder(profile);
         node.querySelector('[data-field="temperature"]').value = profile.temperature ?? 0.2;
         node.querySelector('[data-field="timeout_seconds"]').value = profile.timeout_seconds ?? 90;
         node.querySelector('[data-field="enabled"]').checked = Boolean(profile.enabled);
@@ -964,7 +1204,14 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
-    function apiKeyPlaceholder(provider) {
+    function apiKeyPlaceholder(profile) {
+      const provider = profile.provider || "ollama";
+      const profileId = String(profile.id || "").toLowerCase();
+      const label = String(profile.label || "").toLowerCase();
+      const baseUrl = String(profile.base_url || "").toLowerCase();
+      if (provider === "openai_compatible" && (profileId.includes("litellm") || label.includes("litellm") || baseUrl.includes(":4000"))) {
+        return "LITELLM_API_KEY";
+      }
       if (provider === "openai_compatible") {
         return "OPENAI_API_KEY";
       }
@@ -985,7 +1232,7 @@ INDEX_HTML = """<!doctype html>
       const modelInput = node.querySelector('[data-field="model"]');
       const hint = node.querySelector('[data-field="model_hint"]');
       if (!["openai_compatible", "lmstudio_rest"].includes(provider)) {
-        hint.textContent = "Fetch Models currently supports OpenAI-compatible and LM Studio REST profiles.";
+        hint.textContent = "Fetch Models currently supports OpenAI-compatible, LiteLLM, and LM Studio REST profiles.";
         return;
       }
       if (!baseUrl) {
@@ -1122,6 +1369,138 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
+    async function loadSyncJob(jobId = "") {
+      try {
+        const suffix = jobId ? `?job_id=${encodeURIComponent(jobId)}` : "";
+        const data = await requestJson(`/api/sync${suffix}`, {}, 10);
+        if (!data.job) {
+          currentSyncJobId = null;
+          stopSyncPolling();
+          setSyncButtonBusy(false);
+          return;
+        }
+        currentSyncJobId = data.job.job_id || null;
+        renderSyncJob(data.job);
+        if (isSyncJobActive(data.job)) {
+          queueSyncPoll();
+        } else {
+          stopSyncPolling();
+        }
+      } catch (error) {
+        status("syncStatus", `Sync status failed: ${error.message}`);
+      }
+    }
+
+    function isSyncJobActive(job) {
+      return job && ["queued", "running"].includes(job.status);
+    }
+
+    function queueSyncPoll(delayMs = 1500) {
+      stopSyncPolling();
+      syncPollTimer = setTimeout(() => {
+        pollSyncJob().catch((error) => {
+          status("syncStatus", `Sync status failed: ${error.message}`);
+        });
+      }, delayMs);
+    }
+
+    function stopSyncPolling() {
+      if (syncPollTimer) {
+        clearTimeout(syncPollTimer);
+        syncPollTimer = null;
+      }
+    }
+
+    function setSyncButtonBusy(isBusy) {
+      const button = document.getElementById("syncButton");
+      if (!button) {
+        return;
+      }
+      button.disabled = Boolean(isBusy);
+      button.textContent = isBusy ? "Sync Running..." : "Sync Now";
+    }
+
+    async function pollSyncJob() {
+      if (!currentSyncJobId) {
+        stopSyncPolling();
+        return;
+      }
+      const data = await requestJson(`/api/sync?job_id=${encodeURIComponent(currentSyncJobId)}`, {}, 10);
+      if (!data.job) {
+        currentSyncJobId = null;
+        stopSyncPolling();
+        setSyncButtonBusy(false);
+        return;
+      }
+      renderSyncJob(data.job);
+      if (isSyncJobActive(data.job)) {
+        queueSyncPoll();
+      } else {
+        stopSyncPolling();
+        await loadStatus();
+      }
+    }
+
+    function renderSyncJob(job) {
+      const root = document.getElementById("syncOutput");
+      root.innerHTML = "";
+      setSyncButtonBusy(isSyncJobActive(job));
+
+      const summary = document.createElement("div");
+      summary.className = "result";
+      const progressParts = [];
+      if (job.total_sources !== null && job.total_sources !== undefined) {
+        progressParts.push(`processed ${job.processed_sources || 0} / ${job.total_sources} source(s)`);
+      } else {
+        progressParts.push(`processed ${job.processed_sources || 0} source(s)`);
+      }
+      if (job.requested_limit !== null && job.requested_limit !== undefined) {
+        progressParts.push(`limit ${job.requested_limit}`);
+      }
+      progressParts.push(`created ${job.created_pages || 0}`);
+      progressParts.push(`updated ${job.updated_pages || 0}`);
+      const detailLines = [];
+      if (job.current_source_title) {
+        detailLines.push(`<div>Current source: ${escapeHtml(job.current_source_title)}</div>`);
+      }
+      if (job.current_relative_path) {
+        detailLines.push(`<div class="tiny">${escapeHtml(job.current_relative_path)}</div>`);
+      }
+      if (job.error) {
+        detailLines.push(`<div>${escapeHtml(job.error)}</div>`);
+      }
+      summary.innerHTML = `
+        <h3>Sync ${escapeHtml(titleCase(job.status || "queued"))}</h3>
+        <div class="meta">${progressParts.join(" / ")}</div>
+        <div>${escapeHtml(job.message || "")}</div>
+        ${detailLines.join("")}
+      `;
+      root.appendChild(summary);
+
+      for (const page of job.pages || []) {
+        const item = document.createElement("div");
+        item.className = "result";
+        item.innerHTML = `<h3>${escapeHtml(page.name)}</h3><div class="meta">${escapeHtml(page.kind)} / ${escapeHtml(page.action)} / ${escapeHtml(page.path)}</div>`;
+        root.appendChild(item);
+      }
+
+      if (job.status === "failed") {
+        status("syncStatus", job.error ? `Sync failed: ${job.error}` : "Sync failed.");
+      } else if (isSyncJobActive(job)) {
+        status("syncStatus", job.message || "Sync running...");
+      } else {
+        status("syncStatus", job.message || "Sync complete.");
+      }
+    }
+
+    function titleCase(value) {
+      const text = String(value || "").trim();
+      if (!text) {
+        return "";
+      }
+      return text.charAt(0).toUpperCase() + text.slice(1);
+    }
+
     async function runSearch() {
       const query = document.getElementById("searchInput").value.trim();
       if (!query) {
@@ -1160,34 +1539,127 @@ INDEX_HTML = """<!doctype html>
         status("queryStatus", "Enter a question.");
         return;
       }
-      status("queryStatus", save ? "Asking and saving..." : "Asking...");
-      const response = await fetch("/api/query", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, save })
-      });
-      const data = await response.json();
       const root = document.getElementById("queryOutput");
       root.innerHTML = "";
-      if (data.error) {
-        status("queryStatus", data.error);
-        return;
-      }
+      status("queryStatus", save ? "Searching and streaming answer..." : "Searching and streaming answer...");
+
       const meta = document.createElement("div");
       meta.className = "result";
-      meta.innerHTML = `<h3>${escapeHtml(data.title || "Answer")}</h3><div class="meta">${data.saved_path ? escapeHtml(data.saved_path) : "not saved"}${data.llm ? ` / ${escapeHtml(data.llm.profile_id)} / ${escapeHtml(data.llm.model)}` : ""}</div>`;
+      meta.innerHTML = `<h3>${escapeHtml(question)}</h3><div class="meta">Waiting for the model to respond...</div>`;
       root.appendChild(meta);
       const answer = document.createElement("div");
       answer.className = "mono";
-      answer.textContent = data.answer_markdown || "";
+      answer.textContent = "";
       root.appendChild(answer);
+
+      let response;
+      try {
+        response = await fetch("/api/query/stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question, save })
+        });
+      } catch (error) {
+        status("queryStatus", `Query failed to start: ${error.message}`);
+        return;
+      }
+
+      if (!response.ok) {
+        const failure = await response.json().catch(() => ({}));
+        status("queryStatus", failure.error || `${response.status} ${response.statusText}`);
+        return;
+      }
+
+      if (!response.body) {
+        status("queryStatus", "Streaming is not available in this browser.");
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let streamedText = "";
+      let sawDone = false;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        let newlineIndex = buffer.indexOf("\n");
+        while (newlineIndex >= 0) {
+          const line = buffer.slice(0, newlineIndex).trim();
+          buffer = buffer.slice(newlineIndex + 1);
+          if (line) {
+            const event = JSON.parse(line);
+            if (event.type === "start") {
+              status("queryStatus", event.message || "Starting model...");
+            } else if (event.type === "chunk") {
+              streamedText += event.text || "";
+              answer.textContent = streamedText;
+              status("queryStatus", "Streaming answer...");
+            } else if (event.type === "done") {
+              sawDone = true;
+              renderFinalQueryResult(root, meta, answer, event, streamedText || event.answer_markdown || "");
+              status("queryStatus", "Answer ready.");
+            } else if (event.type === "error") {
+              status("queryStatus", event.error || "Query failed.");
+            }
+          }
+          newlineIndex = buffer.indexOf("\n");
+        }
+      }
+      if (!sawDone && streamedText) {
+        status("queryStatus", "Streaming ended before a final summary arrived.");
+      }
+    }
+
+    function renderFinalQueryResult(root, meta, answer, data, fallbackAnswer) {
+      meta.innerHTML = `<h3>${escapeHtml(data.title || "Answer")}</h3><div class="meta">${data.saved_path ? escapeHtml(data.saved_path) : "not saved"}${data.llm ? ` / ${escapeHtml(data.llm.profile_id)} / ${escapeHtml(data.llm.model)}` : ""}</div>`;
+      answer.textContent = data.answer_markdown || fallbackAnswer || "";
+
+      const existingFollow = root.querySelector('[data-query-section="follow"]');
+      if (existingFollow) {
+        existingFollow.remove();
+      }
+      const existingSources = root.querySelector('[data-query-section="sources"]');
+      if (existingSources) {
+        existingSources.remove();
+      }
+
       if ((data.follow_up_questions || []).length) {
         const follow = document.createElement("div");
         follow.className = "result";
+        follow.dataset.querySection = "follow";
         follow.innerHTML = `<h3>Follow-up Questions</h3>${data.follow_up_questions.map((item) => `<div>- ${escapeHtml(item)}</div>`).join("")}`;
         root.appendChild(follow);
       }
-      status("queryStatus", "Answer ready.");
+
+      if ((data.search_results || []).length) {
+        const sources = document.createElement("div");
+        sources.className = "result";
+        sources.dataset.querySection = "sources";
+        sources.innerHTML = `
+          <h3>Sources</h3>
+          ${(data.search_results || []).map((item) => {
+            const links = [];
+            if (item.document_url) {
+              links.push(`<a class="button-link secondary" href="${escapeAttribute(item.document_url)}" target="_blank" rel="noopener">Open Result</a>`);
+            }
+            if (item.raw_url && item.raw_url !== item.document_url) {
+              links.push(`<a class="button-link secondary" href="${escapeAttribute(item.raw_url)}" target="_blank" rel="noopener">Open Raw</a>`);
+            }
+            return `
+              <div>
+                <div class="meta">${escapeHtml(item.title)} / ${escapeHtml(item.kind)} / ${escapeHtml(item.rel_path)}</div>
+                ${links.length ? `<div class="toolbar">${links.join("")}</div>` : ""}
+              </div>
+            `;
+          }).join("")}
+        `;
+        root.appendChild(sources);
+      }
     }
 
     async function runIngest() {
@@ -1238,32 +1710,32 @@ INDEX_HTML = """<!doctype html>
     }
 
     async function runSync() {
-      status("syncStatus", "Syncing...");
-      const raw = document.getElementById("syncLimit").value.trim();
-      const payload = raw ? { limit: Number(raw) } : {};
-      const response = await fetch("/api/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-      const data = await response.json();
-      const root = document.getElementById("syncOutput");
-      root.innerHTML = "";
-      if (data.error) {
-        status("syncStatus", data.error);
-        return;
+      try {
+        status("syncStatus", "Starting sync...");
+        const raw = document.getElementById("syncLimit").value.trim();
+        const payload = raw ? { limit: Number(raw) } : {};
+        const data = await requestJson("/api/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        }, 15);
+        if (!data.job) {
+          status("syncStatus", "Sync did not return a job.");
+          return;
+        }
+        currentSyncJobId = data.job.job_id || null;
+        renderSyncJob(data.job);
+        if (data.started) {
+          status("syncStatus", data.job.message || "Sync started in the background.");
+        } else {
+          status("syncStatus", "A sync job is already running. Showing current progress.");
+        }
+        if (isSyncJobActive(data.job)) {
+          queueSyncPoll(1000);
+        }
+      } catch (error) {
+        status("syncStatus", `Sync failed to start: ${error.message}`);
       }
-      const summary = document.createElement("div");
-      summary.className = "result";
-      summary.innerHTML = `<h3>Sync Summary</h3><div class="meta">processed ${data.processed_sources} source(s) / created ${data.created_pages} / updated ${data.updated_pages}</div>`;
-      root.appendChild(summary);
-      for (const page of data.pages || []) {
-        const item = document.createElement("div");
-        item.className = "result";
-        item.innerHTML = `<h3>${escapeHtml(page.name)}</h3><div class="meta">${escapeHtml(page.kind)} / ${escapeHtml(page.action)} / ${escapeHtml(page.path)}</div>`;
-        root.appendChild(item);
-      }
-      status("syncStatus", "Sync complete.");
     }
 
     function escapeHtml(value) {
@@ -1300,7 +1772,10 @@ MANUAL_HTML = """<!doctype html>
       margin: 0;
       font-family: "Segoe UI", "Noto Sans TC", "Noto Sans", sans-serif;
       color: #1e2430;
-      background: #f4f6f5;
+      background:
+        radial-gradient(circle at top left, rgba(19, 111, 99, 0.14), transparent 28%),
+        radial-gradient(circle at bottom right, rgba(192, 93, 51, 0.12), transparent 22%),
+        #f6f1e8;
       line-height: 1.65;
     }
     main {
@@ -1309,15 +1784,15 @@ MANUAL_HTML = """<!doctype html>
       padding: 32px 20px 56px;
     }
     section {
-      background: #fff;
-      border: 1px solid #d7dedb;
+      background: rgba(255, 250, 242, 0.96);
+      border: 1px solid #d8cbb8;
       border-radius: 8px;
       padding: 20px;
       margin-top: 16px;
     }
     h1, h2 { line-height: 1.2; }
     code {
-      background: #eef2f1;
+      background: #e9f3ee;
       padding: 2px 5px;
       border-radius: 4px;
     }
@@ -1344,30 +1819,33 @@ MANUAL_HTML = """<!doctype html>
         <li><code>Search</code>：查詢已 ingest 的 source notes、raw copy 與 wiki 頁面。</li>
         <li>搜尋結果可用 <code>Open Result</code> 打開目前文件；若結果對應 source note，還會出現 <code>Open Raw</code> 直接打開 raw markdown。</li>
         <li><code>Ask The Wiki</code>：根據目前 wiki 回答問題；<code>Ask And Save</code> 會把結果存入 <code>wiki/queries</code>。</li>
+        <li><code>Ask The Wiki</code> 現在會串流顯示答案，只要模型已開始輸出 token，畫面就會持續更新。</li>
+        <li><code>Sync Now</code>：背景執行 LLM auto sync，Web UI 會顯示目前 source、已處理數量與完成結果。</li>
       </ol>
     </section>
     <section>
       <h2>LLM Settings</h2>
       <ul>
         <li><code>Add Ollama</code> 建立本機 Ollama profile；通常不需要 API key env。</li>
-        <li><code>Add LM Studio</code> 建立本機 OpenAI-compatible profile，預設使用 <code>http://localhost:1234/v1</code>，通常不需要 API key env。</li>
         <li><code>Add LM Studio REST</code> 建立 LM Studio 原生 REST profile，預設使用 <code>http://localhost:1234/api/v1</code>；若你在 LM Studio 啟用了 API token，可填入對應環境變數名稱。</li>
+        <li><code>Add LiteLLM</code> 建立本機 LiteLLM proxy profile，預設使用 <code>http://localhost:4000</code>；若你的 LiteLLM proxy 啟用了 master key，可填入例如 <code>LITELLM_API_KEY</code>。</li>
         <li>本機 LLM profile 預設 <code>Timeout Seconds</code> 為 300；慢模型或長上下文可再往上調。</li>
         <li><code>Add OpenAI</code> 或 <code>Add Gemini</code> 只保存環境變數名稱，不保存密鑰值。</li>
         <li>API key 可放在 Windows 使用者/系統環境變數，也可放在安裝資料夾的 <code>.env</code> 檔，例如 <code>OPENAI_API_KEY=...</code>。</li>
-        <li>LM Studio 的 <code>Model</code> 要填 API 回傳的 model id 或 model key。先在 LM Studio 啟動 Local Server，再按 <code>Fetch Models</code>。</li>
-        <li>若 <code>Fetch Models</code> 顯示無法連線，通常是 LM Studio server 沒啟動、port 不是 1234，或被防火牆/權限擋住。</li>
+        <li>LM Studio REST 或 LiteLLM 的 <code>Model</code> 要填 API 回傳的 model id 或 model key。先啟動 local server/proxy，再按 <code>Fetch Models</code>。</li>
+        <li>若 <code>Fetch Models</code> 顯示無法連線，通常是本機 server/proxy 沒啟動、port 不正確，或被防火牆/權限擋住。</li>
+        <li><code>Ask The Wiki</code> 串流最適合本機 Ollama、LiteLLM 與 LM Studio REST；若 provider 不支援串流，仍會在完成時一次顯示結果。</li>
         <li><code>Active Profile</code> 是優先使用的 profile；<code>Fallback Order</code> 是失敗時的備援順序。</li>
         <li>修改 profile 後必須按 <code>Save Settings</code>。</li>
         <li><code>Restore Defaults</code> 會重建預設 profile 清單。</li>
       </ul>
     </section>
     <section>
-      <h2>LM Studio 原生 REST API</h2>
+      <h2>LM Studio 與 LiteLLM</h2>
       <ul>
-        <li>LM Studio 原生 REST API <code>/api/v1/*</code> 適合模型管理、載入/卸載、stateful chat 與 MCP。</li>
-        <li>LMIT-2 現在同時支援 OpenAI-compatible <code>/v1/chat/completions</code> 與 LM Studio 原生 <code>/api/v1/chat</code>。</li>
-        <li>如果 OpenAI-compatible profile 能列出模型但 query 仍回傳 <code>400</code>，可直接改用 <code>LM Studio REST</code> profile。</li>
+        <li>LM Studio 原生 REST API 使用 <code>/api/v1/*</code>，LMIT-2 的預設 LM Studio profile 只保留這條路徑。</li>
+        <li>LiteLLM proxy 提供 OpenAI-style gateway，官方 quick start 預設會跑在 <code>http://localhost:4000</code>。</li>
+        <li>LiteLLM 與 OpenAI / Anthropic / Gemini 等遠端模型整合時，通常是把真正的 provider key 配在 LiteLLM proxy 上，LMIT-2 只需要連到 proxy。</li>
         <li>如果 query 回傳 <code>timed out</code>，先把該 profile 的 <code>Timeout Seconds</code> 提高，再重試。</li>
         <li>如果 <code>Sync Now</code> 也回傳 <code>timed out</code>，處理方式相同，因為它使用同一組 LLM profile 與 timeout 設定。</li>
       </ul>
@@ -1375,7 +1853,8 @@ MANUAL_HTML = """<!doctype html>
     <section>
       <h2>Auto Sync 與排程</h2>
       <ul>
-        <li><code>Sync Now</code> 會使用已啟用的 LLM profile 更新 topic/entity 頁面。</li>
+        <li><code>Sync Now</code> 會在背景工作執行，不會把瀏覽器卡在同一個 HTTP 請求上。</li>
+        <li>只要 Web UI 還開著，就會持續輪詢並顯示目前進度與完成結果。</li>
         <li>第一次安裝不建議立即建立排程，因為路徑、ingest 結果與 LLM profile 通常還沒確認。</li>
         <li>需要自動化時，再重新安裝並勾選排程，或用工作排程器手動建立。</li>
       </ul>
@@ -1388,8 +1867,8 @@ MANUAL_HTML = """<!doctype html>
         <li>Ingest 找不到資料時，檢查 <code>Raw Source Paths</code> 是否指向 LMIT-1 的 <code>output/raw</code>。</li>
         <li><code>Save Paths</code> 只儲存路徑與初始化 KB，不會執行 Ingest，也不會呼叫任何 LLM。</li>
         <li>如果按鈕顯示 timeout，通常是 server 未回應、路徑位於慢速/離線磁碟，或另一個長時間操作仍在執行。</li>
-        <li>如果只有 <code>Ask The Wiki</code> 超時，通常是目前模型太慢或 context 太大；優先提高 <code>Timeout Seconds</code> 或改用 <code>LM Studio REST</code>。</li>
-        <li>如果只有 <code>Sync Now</code> 超時，也先提高目前啟用 profile 的 <code>Timeout Seconds</code>。</li>
+        <li>如果只有 <code>Ask The Wiki</code> 沒有任何串流輸出，先確認模型已載入、provider 支援串流，或提高 <code>Timeout Seconds</code>。</li>
+        <li>如果 <code>Sync Now</code> 顯示背景任務失敗，先看進度訊息，再檢查目前 LLM profile 的 <code>Timeout Seconds</code>。</li>
       </ul>
     </section>
   </main>

@@ -1,60 +1,70 @@
-# LMIT-2 Web UI 操作教學
+# LMIT-2 Web UI Guide
 
-這份文件對應 Windows 本機安裝版的 Web UI。
+這份文件對應目前的 Windows 本地安裝版 Web UI。
 
 ## 第一次啟動
 
 1. 開啟 `LMIT-2 Wiki Console`。
-2. 如果 `%APPDATA%\LMIT-2\wiki-only.toml` 還不存在，啟動器會先請你選 knowledge base 資料夾與 LMIT-1 raw Markdown 來源資料夾。
+2. 如果目前使用者還沒有 `%APPDATA%\LMIT-2\wiki-only.toml`，啟動器會先要求選擇 knowledge base 資料夾與 LMIT-1 raw Markdown 來源資料夾。
 3. 進入 Web UI 後，仍可在 `Knowledge Base Path` 與 `Raw Source Paths` 修改路徑。
-4. `Save Paths` 只會儲存路徑並初始化 knowledge base，不會執行 Ingest，也不會呼叫任何 LLM。
+4. 按 `Save Paths` 只會儲存路徑並初始化 knowledge base；它不會執行 Ingest，也不會呼叫任何 LLM。
 5. 路徑確認後，再執行 `Ingest`。
 
 ## 日常流程
 
-1. `Ingest`：讀取 raw Markdown，複製成安全短檔名，產生 source notes、manifest 與 index。
+1. `Ingest`：讀取 raw Markdown，複製成安全短檔名，並產生 source notes、manifest 與 index。
 2. `Lint`：檢查 knowledge base 必要目錄與索引是否存在。
-3. `Search`：查詢已 ingest 的 source notes、raw copy 與 wiki 頁面。
-搜尋結果可直接點 `Open Result`，若該結果對應 source note，還會額外出現 `Open Raw` 連到 raw markdown。
-4. `Ask The Wiki`：根據目前 wiki 回答問題；`Ask And Save` 會把結果存入 `wiki/queries`。
-5. `Sync Now`：使用已啟用的 LLM profile 更新 topic/entity 頁面。
+3. `Search`：搜尋 source notes、raw copy 與 wiki 頁面。
+4. 搜尋結果可用 `Open Result` 打開目前文件；若結果對應 source note，還會出現 `Open Raw` 直接打開 raw markdown。
+5. `Ask The Wiki`：根據目前 wiki 回答問題；`Ask And Save` 會把結果存入 `wiki/queries`。
+6. `Ask The Wiki` 現在會串流顯示答案，只要模型開始輸出 token，畫面就會持續更新。
+7. `Sync Now`：背景執行 LLM auto sync，更新 topic/entity 頁面，並在 Web UI 顯示進度。
 
 ## LLM Settings
 
 - `Add Ollama`：建立本機 Ollama profile。
-- `Add LM Studio`：建立 LM Studio 的 OpenAI-compatible profile，預設 `Base URL` 是 `http://localhost:1234/v1`。
-- `Add LM Studio REST`：建立 LM Studio 原生 REST profile，預設 `Base URL` 是 `http://localhost:1234/api/v1`。
-- `Add OpenAI`、`Add Gemini`：建立外部 API profile。
-- 本機 LLM profile 預設 `Timeout Seconds` 是 `300`；慢模型可再往上調。
-- `Active Profile` 是優先使用的 profile；`Fallback Order` 是失敗時的備援順序。
-- `Save Settings` 只會儲存設定，不會直接呼叫 LLM。
-- Web UI 不再顯示 stored key 狀態；密鑰仍可從 Windows 環境變數或安裝資料夾 `.env` 讀取。
+- `Add LM Studio REST`：建立 LM Studio 原生 REST profile，預設 `Base URL` 為 `http://localhost:1234/api/v1`。
+- `Add LiteLLM`：建立本機 LiteLLM proxy profile，預設 `Base URL` 為 `http://localhost:4000`。
+- `Add OpenAI` / `Add Gemini`：建立雲端 API profile。
+- `Fetch Models` 目前支援 OpenAI-compatible 與 LM Studio REST profile。
+- `Model` 欄位要填 API 真正回傳的 model id 或 model key。
+- API key 只保存「環境變數名稱」，不保存密鑰值本身。
+- 本機 LLM profile 預設 `Timeout Seconds` 為 `300`；慢模型或長上下文可再往上調。
+- `Ask The Wiki` 串流最適合本機 Ollama、LiteLLM 與 LM Studio REST；若 provider 不支援串流，結果會在完成時一次顯示。
+- 修改 profile 後必須按 `Save Settings`。
+- `Restore Defaults` 會重建預設 profile 清單。
 
 ## LM Studio
 
-LM Studio 目前可用兩種接法：
+LM Studio 在 LMIT-2 內預設只保留原生 REST 模式：
 
-- OpenAI-compatible：`http://localhost:1234/v1`
 - Native REST：`http://localhost:1234/api/v1`
 
-`Fetch Models` 會依目前 profile 的 provider 去抓模型：
+建議流程：
 
-- OpenAI-compatible profile：抓 `/v1/models`
-- LM Studio REST profile：抓 `/api/v1/models`
+1. 在 LM Studio 內啟動 Local Server。
+2. 在 LMIT-2 Web UI 內選擇對應 profile。
+3. 按 `Fetch Models`。
+4. 把回傳的 model id 寫入 `Model` 欄位。
 
-`Model` 欄位必須填 API 回傳的 model id 或 model key，不一定等於下載頁顯示名稱。
+## LiteLLM
 
-如果 OpenAI-compatible profile 可以列出模型，但 `Ask The Wiki` 仍回傳 `400 Bad Request`，優先改用 `LM Studio REST` profile。
+LiteLLM Proxy Server 官方 quick start 預設會跑在：
 
-如果 `Ask The Wiki` 顯示 `timed out`，先把目前 profile 的 `Timeout Seconds` 提高，再重試。
-`Sync Now` 若顯示 `timed out`，處理方式相同，因為它使用同一組 LLM profile 與 timeout 設定。
+- `http://localhost:4000`
 
-## API Keys
+如果你的 LiteLLM proxy 啟用了 master key，可在 profile 內填 `LITELLM_API_KEY` 這類環境變數名稱。
+`Fetch Models` 會透過 LiteLLM 的 OpenAI-style `/models` 端點讀取可用模型。
 
-- 外部 OpenAI-compatible profile 若未明填 `API Key Environment Variable`，非本機 URL 會預設讀 `OPENAI_API_KEY`。
-- Gemini profile 若未明填，會預設讀 `GEMINI_API_KEY`。
-- LM Studio REST 若你在 LM Studio 啟用了 API token，可在 profile 填入例如 `LM_STUDIO_API_TOKEN`。
-- `.env` 可放在安裝資料夾，例如：
+## API Keys 與 `.env`
+
+可用的方式：
+
+- Windows 使用者環境變數
+- Windows 系統環境變數
+- 安裝資料夾下的 `.env` 檔
+
+例如：
 
 ```text
 OPENAI_API_KEY=...
@@ -62,10 +72,25 @@ GEMINI_API_KEY=...
 LM_STUDIO_API_TOKEN=...
 ```
 
+Web UI 不會顯示 stored key 值，只顯示 `API Key Environment Variable` 欄位。
+
+## Auto Sync 與排程
+
+- `Sync Now` 會在背景工作執行，不會把瀏覽器卡在單一長請求上。
+- Web UI 會顯示：
+  - 目前任務狀態
+  - 已處理 source 數量
+  - 目前處理中的 source
+  - created / updated page 數量
+  - 完成後的 page 清單
+- 如果有一個 sync job 已在執行，再按一次 `Sync Now` 不會重複開第二個任務，而是回到既有進度畫面。
+- 第一次安裝通常不建議立刻建立 Windows scheduled ingest / sync / lint tasks，因為路徑、ingest 結果與 LLM profile 往往還沒驗證完。
+
 ## 疑難排解
 
-- Web UI 打不開時，先確認 `127.0.0.1:8765` 沒被其他程式佔用。
-- 啟動器錯誤記錄位於 `%APPDATA%\LMIT-2\logs`。
-- Ingest 找不到資料時，檢查 `Raw Source Paths` 是否指向 LMIT-1 的 `output/raw`。
-- `Save Paths` 卡住時，問題通常在 server 或磁碟/權限，不是 LLM。
-- `Save Settings` 卡住時，先查看 `%APPDATA%\LMIT-2\logs`。
+- `Save Paths` 卡住：先看 Web UI 下方狀態列與 `%APPDATA%\LMIT-2\logs`。
+- `Ask The Wiki` 沒有任何串流輸出：先確認模型已載入、provider 支援串流，或提高目前 profile 的 `Timeout Seconds`。
+- `Sync Now` 很久：這不一定是壞掉，因為它現在會在背景跑。先看進度訊息是否持續更新。
+- `Sync Now` 背景任務失敗：先看 Web UI 顯示的錯誤內容，再檢查目前 LLM profile、模型名稱與 timeout。
+- Web UI 打不開：先確認 `127.0.0.1:8765` 沒被其他程式占用。
+- Ingest 找不到資料：確認 `Raw Source Paths` 是否指向 LMIT-1 的 `output/raw`。
