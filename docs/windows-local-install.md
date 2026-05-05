@@ -49,8 +49,8 @@ in manifest/source-note metadata and are not reused as internal KB filenames.
 Start Menu shortcuts:
 
 - `LMIT-2 Wiki Console`: starts the local web UI and opens
-  `http://127.0.0.1:8765`. The shortcut targets
-  `{app}\scripts\start-console.cmd`, which then launches the PowerShell helper.
+  `http://127.0.0.1:8765`. The shortcut targets `powershell.exe`, which launches
+  `{app}\scripts\start-console.ps1`.
 - `LMIT-2 CLI Help`: opens the command-line help for advanced/manual use
 
 Use the web UI for day-to-day actions:
@@ -148,6 +148,8 @@ http://127.0.0.1:8765
 
 If the UI still does not appear, check that port `8765` is free on the machine.
 Launcher logs are written under `%APPDATA%\LMIT-2\logs`.
+If `%APPDATA%\LMIT-2\wiki-only.toml` exists but is invalid, the launcher now
+backs it up as `wiki-only.toml.broken-*.bak` and asks for folders again.
 
 Confirm that long LMIT-1 filenames are visible in `manifest.json` as original
 paths, while files under `knowledge_base/raw/` and `knowledge_base/wiki/` have

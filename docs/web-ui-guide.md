@@ -89,6 +89,7 @@ Web UI 不會顯示 stored key 值，只顯示 `API Key Environment Variable` �
 ## 疑難排解
 
 - `Save Paths` 卡住：先看 Web UI 下方狀態列與 `%APPDATA%\LMIT-2\logs`。
+- 如果 `%APPDATA%\LMIT-2\wiki-only.toml` 已存在但壞掉，啟動器會先備份成 `wiki-only.toml.broken-*.bak`，再要求重新選路徑。
 - `Ask The Wiki` 沒有任何串流輸出：先確認模型已載入、provider 支援串流，或提高目前 profile 的 `Timeout Seconds`。
 - `Sync Now` 很久：這不一定是壞掉，因為它現在會在背景跑。先看進度訊息是否持續更新。
 - `Sync Now` 背景任務失敗：先看 Web UI 顯示的錯誤內容，再檢查目前 LLM profile、模型名稱與 timeout。

@@ -128,8 +128,18 @@ function Ensure-LmitWikiConfig {
         [Parameter(Mandatory=$true)][string]$ConfigPath
     )
 
+    $exe = Join-Path $InstallDir "lmit-wiki.exe"
     if (Test-Path -LiteralPath $ConfigPath) {
-        return
+        try {
+            Invoke-LmitWikiInit -ExePath $exe -ConfigPath $ConfigPath
+            return
+        }
+        catch {
+            $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+            $backupPath = "$ConfigPath.broken-$timestamp.bak"
+            Copy-Item -LiteralPath $ConfigPath -Destination $backupPath -Force
+            Show-LmitInfo "The existing LMIT-2 config could not be loaded, so a backup was saved and the launcher will ask you to choose folders again.`n`nBroken config: $ConfigPath`nBackup: $backupPath"
+        }
     }
 
     $documents = Get-LmitDocumentsPath
@@ -146,6 +156,5 @@ function Ensure-LmitWikiConfig {
         -RawSourceDir $raw `
         -InstallTasks:$false
 
-    $exe = Join-Path $InstallDir "lmit-wiki.exe"
     Invoke-LmitWikiInit -ExePath $exe -ConfigPath $ConfigPath
 }

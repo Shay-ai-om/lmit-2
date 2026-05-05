@@ -1,5 +1,5 @@
 #define AppName "LMIT-2 Wiki"
-#define AppVersion "0.1.10"
+#define AppVersion "0.1.11"
 #define AppPublisher "LMIT"
 
 [Setup]
@@ -30,9 +30,9 @@ Source: "..\..\config\wiki-only.windows.example.toml"; DestDir: "{app}\config"; 
 Source: "..\..\docs\web-ui-guide.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\LMIT-2 Wiki Console"; Filename: "{app}\scripts\start-console.cmd"; WorkingDir: "{app}"
+Name: "{group}\LMIT-2 Wiki Console"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\start-console.ps1"" -InstallDir ""{app}"" -ConfigPath ""{userappdata}\LMIT-2\wiki-only.toml"""; WorkingDir: "{app}"; IconFilename: "{app}\lmit-wiki.exe"
 Name: "{group}\LMIT-2 CLI Help"; Filename: "cmd.exe"; Parameters: "/K ""{app}\lmit-wiki.exe"" --help"
-Name: "{autodesktop}\LMIT-2 Wiki Console"; Filename: "{app}\scripts\start-console.cmd"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autodesktop}\LMIT-2 Wiki Console"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\start-console.ps1"" -InstallDir ""{app}"" -ConfigPath ""{userappdata}\LMIT-2\wiki-only.toml"""; WorkingDir: "{app}"; IconFilename: "{app}\lmit-wiki.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\init-windows-install.ps1"" -InstallDir ""{app}"" -KnowledgeBaseRoot ""{code:GetKnowledgeBaseRoot}"" -RawSourceDir ""{code:GetRawSourceDir}"" -ConfigPath ""{userappdata}\LMIT-2\wiki-only.toml"" -InstallTasks:{code:GetInstallTasks}"; Flags: runhidden waituntilterminated

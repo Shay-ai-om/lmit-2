@@ -47,25 +47,30 @@ $logDir = Join-Path $configDir "logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $stdoutPath = Join-Path $logDir "serve.stdout.log"
 $stderrPath = Join-Path $logDir "serve.stderr.log"
+$launcherPath = Join-Path $logDir "console-launcher.log"
+[System.IO.File]::WriteAllText($launcherPath, "", [System.Text.UTF8Encoding]::new($false))
 
-$server = New-Object System.Diagnostics.ProcessStartInfo
-$server.FileName = $ExePath
-$server.Arguments = "serve --config $(Quote-Argument $ConfigPath) --host 127.0.0.1 --port 8765"
-$server.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-$server.UseShellExecute = $false
-$server.RedirectStandardOutput = $true
-$server.RedirectStandardError = $true
-$server.CreateNoWindow = $true
-$serverProcess = [System.Diagnostics.Process]::Start($server)
+$serverProcess = Start-Process `
+    -FilePath $ExePath `
+    -ArgumentList @("serve", "--config", $ConfigPath, "--host", "127.0.0.1", "--port", "8765") `
+    -WorkingDirectory $InstallDir `
+    -WindowStyle Hidden `
+    -RedirectStandardOutput $stdoutPath `
+    -RedirectStandardError $stderrPath `
+    -PassThru
+
+[System.IO.File]::AppendAllText(
+    $launcherPath,
+    "Started lmit-wiki.exe serve with config $ConfigPath at $([DateTime]::UtcNow.ToString('o'))`r`n",
+    [System.Text.UTF8Encoding]::new($false)
+)
 
 $deadline = [DateTime]::UtcNow.AddSeconds(20)
 while ([DateTime]::UtcNow -lt $deadline) {
     if ($serverProcess.HasExited) {
         $code = $serverProcess.ExitCode
-        $stdout = $serverProcess.StandardOutput.ReadToEnd()
-        $stderr = $serverProcess.StandardError.ReadToEnd()
-        [System.IO.File]::WriteAllText($stdoutPath, $stdout, [System.Text.UTF8Encoding]::new($false))
-        [System.IO.File]::WriteAllText($stderrPath, $stderr, [System.Text.UTF8Encoding]::new($false))
+        $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue } else { "" }
+        $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue } else { "" }
         Show-LmitError "LMIT-2 Wiki server exited before opening the UI. Exit code: $code.`n`n$stderr`n`nConfig: $ConfigPath`nLog: $stderrPath"
         exit 1
     }
@@ -79,7 +84,7 @@ if ($serverProcess.HasExited -or -not (Test-TcpPort -HostName "127.0.0.1" -Port 
     if (-not $serverProcess.HasExited) {
         $serverProcess.Kill()
     }
-    Show-LmitError "LMIT-2 Wiki server did not start listening on 127.0.0.1:8765. Check whether another app is already using that port.`n`nConfig: $ConfigPath"
+    Show-LmitError "LMIT-2 Wiki server did not start listening on 127.0.0.1:8765. Check whether another app is already using that port.`n`nConfig: $ConfigPath`nLog: $stderrPath"
     exit 1
 }
 
