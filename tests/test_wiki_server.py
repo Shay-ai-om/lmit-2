@@ -38,6 +38,7 @@ def test_web_ui_exposes_llm_profile_controls_and_default_restore(tmp_path):
     html = _call_html(app, "GET", "/")
     assert "Add Ollama" in html
     assert "Add LM Studio" in html
+    assert "Add LM Studio REST" in html
     assert "Add OpenAI" in html
     assert "Add Gemini" in html
     assert "Restore Defaults" in html
@@ -48,11 +49,14 @@ def test_web_ui_exposes_llm_profile_controls_and_default_restore(tmp_path):
     assert profile_ids == [
         "ollama-local",
         "lm-studio-local",
+        "lm-studio-rest",
         "openai-compatible",
         "gemini",
     ]
     lm_studio = defaults["profiles"][1]
+    lm_studio_rest = defaults["profiles"][2]
     assert lm_studio["base_url"] == "http://localhost:1234/v1"
+    assert lm_studio_rest["base_url"] == "http://localhost:1234/api/v1"
     assert lm_studio["api_key_env"] == ""
     assert defaults["active_profile"] == "ollama-local"
 
@@ -105,26 +109,33 @@ def test_web_ui_links_manual_and_exposes_path_controls(tmp_path):
     assert "LMIT-2 Web UI 操作教學" in manual
     assert "Save Paths" in manual
     assert "Fetch Models" in manual
+    assert "LM Studio REST" in manual
 
 
-def test_web_ui_fetches_openai_compatible_model_ids(tmp_path, monkeypatch):
+def test_web_ui_fetches_model_choices_for_supported_providers(tmp_path, monkeypatch):
     cfg = default_config(tmp_path)
     app = WikiWebApp(cfg)
 
-    def fake_fetch(base_url: str) -> list[str]:
-        assert base_url == "http://localhost:1234/v1"
-        return ["google/gemma-4-e4b-it"]
+    def fake_fetch(provider: str, base_url: str, *, api_key_env: str = "", timeout_seconds: int = 8):
+        assert provider == "lmstudio_rest"
+        assert base_url == "http://localhost:1234/api/v1"
+        assert api_key_env == "LM_STUDIO_API_TOKEN"
+        assert timeout_seconds == 8
+        return [{"id": "google/gemma-4-e4b-it", "label": "Gemma -> google/gemma-4-e4b-it [loaded]"}]
 
-    monkeypatch.setattr("lmit_wiki.server._fetch_openai_compatible_models", fake_fetch)
+    monkeypatch.setattr("lmit_wiki.server.fetch_model_choices", fake_fetch)
 
     payload = _call_json(
         app,
         "GET",
         "/api/models",
-        query_string="base_url=http%3A%2F%2Flocalhost%3A1234%2Fv1",
+        query_string=(
+            "provider=lmstudio_rest&base_url=http%3A%2F%2Flocalhost%3A1234%2Fapi%2Fv1"
+            "&api_key_env=LM_STUDIO_API_TOKEN"
+        ),
     )
 
-    assert payload["models"] == ["google/gemma-4-e4b-it"]
+    assert payload["models"][0]["id"] == "google/gemma-4-e4b-it"
 
 
 def test_web_ui_uses_threaded_server_and_nonblocking_status():

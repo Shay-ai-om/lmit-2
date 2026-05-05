@@ -3,6 +3,7 @@
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 import json
@@ -17,6 +18,7 @@ from lmit_wiki.policy import EXTERNAL_LLM_ALLOWED, filter_profiles_for_policy
 
 SUPPORTED_PROVIDERS = {
     "openai_compatible",
+    "lmstudio_rest",
     "gemini",
     "ollama",
 }
@@ -87,6 +89,7 @@ def default_runtime_settings_payload() -> dict[str, Any]:
         "fallback_order": [
             "ollama-local",
             "lm-studio-local",
+            "lm-studio-rest",
             "openai-compatible",
             "gemini",
         ],
@@ -107,6 +110,17 @@ def default_runtime_settings_payload() -> dict[str, Any]:
                 "provider": "openai_compatible",
                 "label": "LM Studio Local",
                 "base_url": "http://localhost:1234/v1",
+                "model": "local-model",
+                "api_key_env": "",
+                "enabled": False,
+                "temperature": 0.2,
+                "timeout_seconds": 120,
+            },
+            {
+                "id": "lm-studio-rest",
+                "provider": "lmstudio_rest",
+                "label": "LM Studio REST",
+                "base_url": "http://localhost:1234/api/v1",
                 "model": "local-model",
                 "api_key_env": "",
                 "enabled": False,
@@ -203,8 +217,6 @@ def runtime_settings_public_payload(settings: WikiRuntimeSettings) -> dict[str, 
                 "enabled": profile.enabled,
                 "temperature": profile.temperature,
                 "timeout_seconds": profile.timeout_seconds,
-                "api_key_present": bool(_resolved_api_key(profile)),
-                "api_key_masked": _masked_secret(_resolved_api_key(profile)),
             }
             for profile in settings.profiles
         ],
@@ -423,6 +435,8 @@ def _profile_from_payload(payload: dict[str, Any]) -> LLMProfile:
 def _invoke_profile(profile: LLMProfile, messages: list[dict[str, str]]) -> str:
     if profile.provider == "openai_compatible":
         return _invoke_openai_compatible(profile, messages)
+    if profile.provider == "lmstudio_rest":
+        return _invoke_lmstudio_rest(profile, messages)
     if profile.provider == "gemini":
         return _invoke_gemini(profile, messages)
     if profile.provider == "ollama":
@@ -437,21 +451,65 @@ def _invoke_openai_compatible(profile: LLMProfile, messages: list[dict[str, str]
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    data = _post_json(
-        _openai_chat_url(profile.base_url),
-        headers,
-        {
-            "model": profile.model,
-            "messages": messages,
-            "temperature": profile.temperature,
-        },
-        timeout_seconds=profile.timeout_seconds,
-    )
+    try:
+        data = _post_json(
+            _openai_chat_url(profile.base_url),
+            headers,
+            {
+                "model": profile.model,
+                "messages": messages,
+                "temperature": profile.temperature,
+            },
+            timeout_seconds=profile.timeout_seconds,
+        )
+    except RuntimeSettingsError as exc:
+        if _looks_like_lmstudio_openai_url(profile.base_url):
+            raise RuntimeSettingsError(
+                f"{exc} If this is LM Studio, confirm the selected model id is chat-capable "
+                "or switch this profile to LM Studio REST."
+            ) from exc
+        raise
     try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeSettingsError("invalid OpenAI-compatible response") from exc
     return _flatten_message_content(content)
+
+
+def _invoke_lmstudio_rest(profile: LLMProfile, messages: list[dict[str, str]]) -> str:
+    api_key = _resolved_api_key(profile)
+    if profile.api_key_env and not api_key:
+        raise RuntimeSettingsError(f"profile {profile.profile_id} is missing an API key")
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    system_prompt, input_text = _lmstudio_rest_prompt(messages)
+    data = _post_json(
+        _lmstudio_chat_url(profile.base_url),
+        headers,
+        {
+            "model": profile.model,
+            "input": input_text,
+            "system_prompt": system_prompt,
+            "temperature": profile.temperature,
+            "store": False,
+        },
+        timeout_seconds=profile.timeout_seconds,
+    )
+
+    output = data.get("output")
+    if not isinstance(output, list):
+        raise RuntimeSettingsError("invalid LM Studio REST response")
+    parts = [
+        str(item.get("content", "")).strip()
+        for item in output
+        if isinstance(item, dict) and item.get("type") == "message"
+    ]
+    content = "\n\n".join(part for part in parts if part)
+    if not content:
+        raise RuntimeSettingsError("LM Studio REST returned no message content")
+    return content
 
 
 def _invoke_gemini(profile: LLMProfile, messages: list[dict[str, str]]) -> str:
@@ -531,13 +589,66 @@ def _post_json(
 ) -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     request = Request(url, data=body, headers=headers, method="POST")
-    with urlopen(request, timeout=timeout_seconds) as response:
-        charset = response.headers.get_content_charset("utf-8")
-        raw = response.read().decode(charset, errors="replace")
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            charset = response.headers.get_content_charset("utf-8")
+            raw = response.read().decode(charset, errors="replace")
+    except HTTPError as exc:
+        raise RuntimeSettingsError(_http_error_message(url, exc)) from exc
+    except URLError as exc:
+        raise RuntimeSettingsError(_network_error_message(url, exc)) from exc
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
         raise RuntimeSettingsError(f"invalid JSON response from {url}") from exc
+
+
+def _get_json(
+    url: str,
+    headers: dict[str, str],
+    *,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    request = Request(url, headers=headers, method="GET")
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            charset = response.headers.get_content_charset("utf-8")
+            raw = response.read().decode(charset, errors="replace")
+    except HTTPError as exc:
+        raise RuntimeSettingsError(_http_error_message(url, exc)) from exc
+    except URLError as exc:
+        raise RuntimeSettingsError(_network_error_message(url, exc)) from exc
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeSettingsError(f"invalid JSON response from {url}") from exc
+
+
+def fetch_model_choices(
+    provider: str,
+    base_url: str,
+    *,
+    api_key_env: str = "",
+    timeout_seconds: int = 8,
+) -> list[dict[str, str]]:
+    profile = LLMProfile(
+        profile_id="model-discovery",
+        provider=provider,
+        label="Model Discovery",
+        base_url=base_url,
+        model="_",
+        api_key_env=api_key_env,
+        enabled=True,
+    )
+    if provider == "openai_compatible":
+        payload = _get_json(_openai_models_url(base_url), _json_headers(profile), timeout_seconds=timeout_seconds)
+        return [{"id": item, "label": item} for item in _openai_model_ids_from_payload(payload)]
+    if provider == "lmstudio_rest":
+        payload = _get_json(_lmstudio_models_url(base_url), _json_headers(profile), timeout_seconds=timeout_seconds)
+        return _lmstudio_model_choices_from_payload(payload)
+    raise RuntimeSettingsError(
+        "Fetch Models currently supports OpenAI-compatible and LM Studio REST providers."
+    )
 
 
 def _openai_chat_url(base_url: str) -> str:
@@ -547,9 +658,21 @@ def _openai_chat_url(base_url: str) -> str:
     return normalized + "/chat/completions"
 
 
+def _openai_models_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/models"):
+        return normalized
+    return normalized + "/models"
+
+
 def _is_local_base_url(base_url: str) -> bool:
     hostname = urlparse(base_url).hostname
     return hostname in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
+def _looks_like_lmstudio_openai_url(base_url: str) -> bool:
+    normalized = base_url.rstrip("/").lower()
+    return _is_local_base_url(normalized) and normalized.endswith("/v1")
 
 
 def _ollama_chat_url(base_url: str) -> str:
@@ -559,6 +682,20 @@ def _ollama_chat_url(base_url: str) -> str:
     if normalized.endswith("/api"):
         return normalized + "/chat"
     return normalized + "/api/chat"
+
+
+def _lmstudio_chat_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/chat"):
+        return normalized
+    return normalized + "/chat"
+
+
+def _lmstudio_models_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/models"):
+        return normalized
+    return normalized + "/models"
 
 
 def _gemini_generate_url(base_url: str, model: str) -> str:
@@ -581,6 +718,124 @@ def _resolved_api_key(profile: LLMProfile) -> str:
     if profile.provider == "gemini":
         return _environment_secret("GEMINI_API_KEY")
     return ""
+
+
+def _json_headers(profile: LLMProfile) -> dict[str, str]:
+    headers = {"Accept": "application/json"}
+    api_key = _resolved_api_key(profile)
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _lmstudio_rest_prompt(messages: list[dict[str, str]]) -> tuple[str, str]:
+    system_parts: list[str] = []
+    dialogue_parts: list[str] = []
+    for message in messages:
+        role = str(message.get("role", "user")).strip() or "user"
+        content = str(message.get("content", "")).strip()
+        if not content:
+            continue
+        if role == "system":
+            system_parts.append(content)
+            continue
+        prefix = "Assistant" if role == "assistant" else "User"
+        dialogue_parts.append(f"{prefix}:\n{content}")
+    if not dialogue_parts:
+        dialogue_parts.append("User:\n")
+    return "\n\n".join(system_parts).strip(), "\n\n".join(dialogue_parts).strip()
+
+
+def _openai_model_ids_from_payload(payload: object) -> list[str]:
+    if isinstance(payload, dict):
+        raw_models = payload.get("data")
+        if raw_models is None:
+            raw_models = payload.get("models")
+    else:
+        raw_models = payload
+    if not isinstance(raw_models, list):
+        return []
+
+    model_ids: list[str] = []
+    seen: set[str] = set()
+    for item in raw_models:
+        model_id = ""
+        if isinstance(item, str):
+            model_id = item
+        elif isinstance(item, dict):
+            for key in ("id", "model", "name", "path"):
+                value = item.get(key)
+                if value:
+                    model_id = str(value)
+                    break
+        model_id = model_id.strip()
+        if model_id and model_id not in seen:
+            model_ids.append(model_id)
+            seen.add(model_id)
+    return model_ids
+
+
+def _lmstudio_model_choices_from_payload(payload: object) -> list[dict[str, str]]:
+    if not isinstance(payload, dict):
+        return []
+    raw_models = payload.get("models")
+    if not isinstance(raw_models, list):
+        return []
+
+    choices: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw_models:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("key") or "").strip()
+        if not model_id or model_id in seen:
+            continue
+        loaded_instances = item.get("loaded_instances")
+        loaded_suffix = ""
+        if isinstance(loaded_instances, list) and loaded_instances:
+            loaded_suffix = " [loaded]"
+        display_name = str(item.get("display_name") or model_id).strip()
+        choices.append(
+            {
+                "id": model_id,
+                "label": f"{display_name} -> {model_id}{loaded_suffix}",
+            }
+        )
+        seen.add(model_id)
+    return choices
+
+
+def _http_error_message(url: str, exc: HTTPError) -> str:
+    body = exc.read().decode("utf-8", errors="replace").strip()
+    detail = _error_detail_from_text(body) or exc.reason or "request failed"
+    return f"{exc.code} from {url}: {detail}"
+
+
+def _network_error_message(url: str, exc: URLError) -> str:
+    return f"Could not connect to {url}: {exc.reason}"
+
+
+def _error_detail_from_text(text: str) -> str:
+    if not text:
+        return ""
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return text[:300]
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            for key in ("message", "error", "detail"):
+                value = error.get(key)
+                if value:
+                    return str(value)
+        if error:
+            return str(error)
+        for key in ("message", "detail"):
+            value = payload.get(key)
+            if value:
+                return str(value)
+    return text[:300]
 
 
 def _environment_secret(name: str) -> str:

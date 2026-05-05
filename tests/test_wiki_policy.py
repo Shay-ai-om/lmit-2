@@ -48,6 +48,19 @@ def test_openai_compatible_private_lan_endpoint_is_not_external():
     assert provider_is_external(profile) is False
 
 
+def test_lmstudio_rest_endpoint_is_not_external():
+    profile = LLMProfile(
+        profile_id="lmstudio",
+        provider="lmstudio_rest",
+        label="LM Studio REST",
+        base_url="http://localhost:1234/api/v1",
+        model="google/gemma-4-e4b-it",
+        api_key_env="",
+    )
+
+    assert provider_is_external(profile) is False
+
+
 def test_local_only_policy_filters_external_profiles():
     external = LLMProfile(
         profile_id="openai",

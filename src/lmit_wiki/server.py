@@ -4,9 +4,7 @@ from http import HTTPStatus
 from pathlib import Path
 from socketserver import ThreadingMixIn
 from threading import RLock
-from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs
-from urllib.request import Request, urlopen
 from wsgiref.simple_server import WSGIServer, make_server
 import json
 
@@ -16,6 +14,7 @@ from lmit_wiki.auto import auto_sync_wiki
 from lmit_wiki.query import answer_wiki_query
 from lmit_wiki.runtime import (
     default_runtime_settings_payload,
+    fetch_model_choices,
     load_runtime_settings,
     merge_runtime_settings_payload,
     runtime_settings_public_payload,
@@ -170,12 +169,22 @@ class WikiWebApp:
                 )
             if method == "GET" and path == "/api/models":
                 query = parse_qs(environ.get("QUERY_STRING", ""))
+                provider = query.get("provider", [""])[0].strip()
                 base_url = query.get("base_url", [""])[0].strip()
+                api_key_env = query.get("api_key_env", [""])[0].strip()
+                if not provider:
+                    raise ValueError("Provider is required before fetching models.")
                 if not base_url:
                     raise ValueError("Base URL is required before fetching models.")
                 return self._json(
                     start_response,
-                    {"models": _fetch_openai_compatible_models(base_url)},
+                    {
+                        "models": fetch_model_choices(
+                            provider,
+                            base_url,
+                            api_key_env=api_key_env,
+                        )
+                    },
                 )
             if method == "POST" and path == "/api/settings/defaults":
                 settings = save_runtime_settings(
@@ -271,68 +280,6 @@ def _payload_source_dirs(value: object) -> list[Path]:
         items = str(value or "").replace(";", "\n").splitlines()
         items = [item.strip() for item in items]
     return [Path(item) for item in items if item]
-
-
-def _fetch_openai_compatible_models(base_url: str, *, timeout_seconds: int = 8) -> list[str]:
-    url = _models_url(base_url)
-    request = Request(url, headers={"Accept": "application/json"}, method="GET")
-    try:
-        with urlopen(request, timeout=timeout_seconds) as response:
-            charset = response.headers.get_content_charset("utf-8")
-            raw = response.read().decode(charset, errors="replace")
-    except HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:300]
-        raise RuntimeError(f"{url} returned HTTP {exc.code}: {body}") from exc
-    except URLError as exc:
-        reason = str(exc.reason)
-        raise RuntimeError(
-            f"Could not connect to {url}. Start the LM Studio Local Server, "
-            f"load a model, and confirm the port. Details: {reason}"
-        ) from exc
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"{url} returned invalid JSON.") from exc
-    models = _model_ids_from_payload(payload)
-    if not models:
-        raise RuntimeError(f"{url} did not return any model ids.")
-    return models
-
-
-def _models_url(base_url: str) -> str:
-    normalized = base_url.rstrip("/")
-    if normalized.endswith("/models"):
-        return normalized
-    return normalized + "/models"
-
-
-def _model_ids_from_payload(payload: object) -> list[str]:
-    if isinstance(payload, dict):
-        raw_models = payload.get("data")
-        if raw_models is None:
-            raw_models = payload.get("models")
-    else:
-        raw_models = payload
-    if not isinstance(raw_models, list):
-        return []
-
-    model_ids: list[str] = []
-    seen: set[str] = set()
-    for item in raw_models:
-        model_id = ""
-        if isinstance(item, str):
-            model_id = item
-        elif isinstance(item, dict):
-            for key in ("id", "model", "name", "path"):
-                value = item.get(key)
-                if value:
-                    model_id = str(value)
-                    break
-        model_id = model_id.strip()
-        if model_id and model_id not in seen:
-            model_ids.append(model_id)
-            seen.add(model_id)
-    return model_ids
 
 
 INDEX_HTML = """<!doctype html>
@@ -614,7 +561,7 @@ INDEX_HTML = """<!doctype html>
             <li>If no config exists yet, the launcher asks for the knowledge base and raw Markdown folders.</li>
             <li>Inside the Web UI, you can still edit <code>Knowledge Base Path</code> and <code>Raw Source Paths</code>.</li>
             <li>Click <code>Save Paths</code>, then run <code>Ingest</code>.</li>
-            <li>For LM Studio, start its Local Server, then use <code>Fetch Models</code> to fill the model id.</li>
+            <li>For LM Studio, start its Local Server, then use <code>Fetch Models</code> to fill the model id for either the OpenAI-compatible or REST profile.</li>
           </ol>
         </div>
         <div>
@@ -701,12 +648,13 @@ INDEX_HTML = """<!doctype html>
           </label>
           <label class="field">
             <span>Fallback Order</span>
-            <input id="fallbackOrder" placeholder="ollama-local, lm-studio-local, openai-compatible, gemini">
+            <input id="fallbackOrder" placeholder="ollama-local, lm-studio-local, lm-studio-rest, openai-compatible, gemini">
           </label>
         </div>
         <div class="toolbar">
           <button class="secondary" onclick="addProfile('ollama')">Add Ollama</button>
           <button class="secondary" onclick="addProfile('lmstudio')">Add LM Studio</button>
+          <button class="secondary" onclick="addProfile('lmstudioRest')">Add LM Studio REST</button>
           <button class="secondary" onclick="addProfile('openai')">Add OpenAI</button>
           <button class="secondary" onclick="addProfile('gemini')">Add Gemini</button>
           <button class="secondary" onclick="restoreDefaults()">Restore Defaults</button>
@@ -740,6 +688,7 @@ INDEX_HTML = """<!doctype html>
           <select data-field="provider">
             <option value="ollama">ollama</option>
             <option value="openai_compatible">openai_compatible</option>
+            <option value="lmstudio_rest">lmstudio_rest</option>
             <option value="gemini">gemini</option>
           </select>
         </label>
@@ -755,12 +704,11 @@ INDEX_HTML = """<!doctype html>
       <div class="toolbar">
         <button class="secondary" onclick="fetchModels(this)">Fetch Models</button>
       </div>
-      <div class="tiny" data-field="model_hint">For LM Studio, start the Local Server first, then fetch models and use the returned id.</div>
+      <div class="tiny" data-field="model_hint">For LM Studio, start the Local Server first, then fetch models and use the returned id or key.</div>
       <label class="field">
         <span>API Key Environment Variable</span>
         <input data-field="api_key_env" placeholder="OPENAI_API_KEY">
       </label>
-      <div class="tiny" data-field="api_key_hint"></div>
       <div class="row">
         <label class="field">
           <span>Temperature</span>
@@ -804,6 +752,17 @@ INDEX_HTML = """<!doctype html>
         provider: "openai_compatible",
         label: "LM Studio Local",
         base_url: "http://localhost:1234/v1",
+        model: "local-model",
+        api_key_env: "",
+        enabled: false,
+        temperature: 0.2,
+        timeout_seconds: 120
+      },
+      lmstudioRest: {
+        id: "lm-studio-rest",
+        provider: "lmstudio_rest",
+        label: "LM Studio REST",
+        base_url: "http://localhost:1234/api/v1",
         model: "local-model",
         api_key_env: "",
         enabled: false,
@@ -929,9 +888,6 @@ INDEX_HTML = """<!doctype html>
         node.querySelector('[data-field="temperature"]').value = profile.temperature ?? 0.2;
         node.querySelector('[data-field="timeout_seconds"]').value = profile.timeout_seconds ?? 90;
         node.querySelector('[data-field="enabled"]').checked = Boolean(profile.enabled);
-        node.querySelector('[data-field="api_key_hint"]').textContent = profile.api_key_present
-          ? `Stored key: ${profile.api_key_masked}`
-          : "No stored key";
         root.appendChild(node);
       }
     }
@@ -939,6 +895,9 @@ INDEX_HTML = """<!doctype html>
     function apiKeyPlaceholder(provider) {
       if (provider === "openai_compatible") {
         return "OPENAI_API_KEY";
+      }
+      if (provider === "lmstudio_rest") {
+        return "LM_STUDIO_API_TOKEN";
       }
       if (provider === "gemini") {
         return "GEMINI_API_KEY";
@@ -950,10 +909,11 @@ INDEX_HTML = """<!doctype html>
       const node = button.closest(".profile");
       const provider = node.querySelector('[data-field="provider"]').value;
       const baseUrl = node.querySelector('[data-field="base_url"]').value.trim();
+      const apiKeyEnv = node.querySelector('[data-field="api_key_env"]').value.trim();
       const modelInput = node.querySelector('[data-field="model"]');
       const hint = node.querySelector('[data-field="model_hint"]');
-      if (provider !== "openai_compatible") {
-        hint.textContent = "Fetch Models currently supports LM Studio and other OpenAI-compatible endpoints.";
+      if (!["openai_compatible", "lmstudio_rest"].includes(provider)) {
+        hint.textContent = "Fetch Models currently supports OpenAI-compatible and LM Studio REST profiles.";
         return;
       }
       if (!baseUrl) {
@@ -962,14 +922,22 @@ INDEX_HTML = """<!doctype html>
       }
       try {
         hint.textContent = "Fetching models...";
-        const data = await requestJson(`/api/models?base_url=${encodeURIComponent(baseUrl)}`, {}, 8);
+        const params = new URLSearchParams({
+          provider,
+          base_url: baseUrl
+        });
+        if (apiKeyEnv) {
+          params.set("api_key_env", apiKeyEnv);
+        }
+        const data = await requestJson(`/api/models?${params.toString()}`, {}, 8);
         const models = data.models || [];
         if (!models.length) {
           hint.textContent = "No models returned by this endpoint.";
           return;
         }
-        modelInput.value = models[0];
-        hint.textContent = `Models: ${models.join(", ")}`;
+        const first = models[0];
+        modelInput.value = typeof first === "string" ? first : (first.id || "");
+        hint.textContent = `Models: ${models.map((item) => typeof item === "string" ? item : (item.label || item.id || "")).join(", ")}`;
       } catch (error) {
         hint.textContent = `Model fetch failed: ${error.message}`;
       }
@@ -1290,9 +1258,10 @@ MANUAL_HTML = """<!doctype html>
       <ul>
         <li><code>Add Ollama</code> 建立本機 Ollama profile；通常不需要 API key env。</li>
         <li><code>Add LM Studio</code> 建立本機 OpenAI-compatible profile，預設使用 <code>http://localhost:1234/v1</code>，通常不需要 API key env。</li>
+        <li><code>Add LM Studio REST</code> 建立 LM Studio 原生 REST profile，預設使用 <code>http://localhost:1234/api/v1</code>；若你在 LM Studio 啟用了 API token，可填入對應環境變數名稱。</li>
         <li><code>Add OpenAI</code> 或 <code>Add Gemini</code> 只保存環境變數名稱，不保存密鑰值。</li>
         <li>API key 可放在 Windows 使用者/系統環境變數，也可放在安裝資料夾的 <code>.env</code> 檔，例如 <code>OPENAI_API_KEY=...</code>。</li>
-        <li>LM Studio 的 <code>Model</code> 要填 API 回傳的 model id。先在 LM Studio 啟動 Local Server 並載入模型，再按 <code>Fetch Models</code>。</li>
+        <li>LM Studio 的 <code>Model</code> 要填 API 回傳的 model id 或 model key。先在 LM Studio 啟動 Local Server，再按 <code>Fetch Models</code>。</li>
         <li>若 <code>Fetch Models</code> 顯示無法連線，通常是 LM Studio server 沒啟動、port 不是 1234，或被防火牆/權限擋住。</li>
         <li><code>Active Profile</code> 是優先使用的 profile；<code>Fallback Order</code> 是失敗時的備援順序。</li>
         <li>修改 profile 後必須按 <code>Save Settings</code>。</li>
@@ -1303,8 +1272,8 @@ MANUAL_HTML = """<!doctype html>
       <h2>LM Studio 原生 REST API</h2>
       <ul>
         <li>LM Studio 原生 REST API <code>/api/v1/*</code> 適合模型管理、載入/卸載、stateful chat 與 MCP。</li>
-        <li>LMIT-2 目前只需要一般 chat completion 與 citation workflow，所以先使用 OpenAI-compatible <code>/v1/chat/completions</code>。</li>
-        <li>之後若要在 Web UI 內管理 LM Studio 模型，再接原生 REST API 會更合適。</li>
+        <li>LMIT-2 現在同時支援 OpenAI-compatible <code>/v1/chat/completions</code> 與 LM Studio 原生 <code>/api/v1/chat</code>。</li>
+        <li>如果 OpenAI-compatible profile 能列出模型但 query 仍回傳 <code>400</code>，可直接改用 <code>LM Studio REST</code> profile。</li>
       </ul>
     </section>
     <section>

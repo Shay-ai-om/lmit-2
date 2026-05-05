@@ -41,7 +41,7 @@ def llm_policy_for_sources(records: list[dict[str, Any]]) -> str:
 
 def provider_is_external(profile: Any) -> bool:
     provider = str(getattr(profile, "provider", "")).strip()
-    if provider == "ollama":
+    if provider in {"ollama", "lmstudio_rest"}:
         return False
     if provider == "gemini":
         return True
