@@ -9,16 +9,17 @@ param(
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "config-common.ps1")
 
-Write-LmitWikiConfig `
-    -ConfigPath $ConfigPath `
-    -KnowledgeBaseRoot $KnowledgeBaseRoot `
-    -RawSourceDir $RawSourceDir `
-    -InstallTasks:$InstallTasks
-
 $ExePath = Join-Path $InstallDir "lmit-wiki.exe"
-Invoke-LmitWikiInit -ExePath $ExePath -ConfigPath $ConfigPath
 
 if ($InstallTasks) {
+    Write-LmitWikiConfig `
+        -ConfigPath $ConfigPath `
+        -KnowledgeBaseRoot $KnowledgeBaseRoot `
+        -RawSourceDir $RawSourceDir `
+        -InstallTasks:$InstallTasks
+
+    Invoke-LmitWikiInit -ExePath $ExePath -ConfigPath $ConfigPath
+
     & (Join-Path $InstallDir "scripts\install-scheduled-tasks.ps1") `
         -ExePath $ExePath `
         -ConfigPath $ConfigPath `

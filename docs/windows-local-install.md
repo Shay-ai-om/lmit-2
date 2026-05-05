@@ -34,12 +34,12 @@ The installer writes a default active config to:
 ```
 
 The installer no longer asks for the knowledge-base folder or the LMIT-1 raw
-Markdown folder. Open `LMIT-2 Wiki Console`, then use the web UI fields
-`Knowledge Base Path` and `Raw Source Paths` to review or change those paths.
+Markdown folder.
 
 If the config is missing when `LMIT-2 Wiki Console` starts, the launcher
-recreates it with default Documents paths before starting the server. The paths
-can still be changed from the web UI after startup.
+asks for the knowledge-base folder and the LMIT-1 raw Markdown folder before
+starting the server. The paths can still be changed from the web UI after
+startup through `Knowledge Base Path` and `Raw Source Paths`.
 
 Generated wiki files use short ASCII storage names. Original long filenames stay
 in manifest/source-note metadata and are not reused as internal KB filenames.
@@ -49,7 +49,8 @@ in manifest/source-note metadata and are not reused as internal KB filenames.
 Start Menu shortcuts:
 
 - `LMIT-2 Wiki Console`: starts the local web UI and opens
-  `http://127.0.0.1:8765`
+  `http://127.0.0.1:8765`. The shortcut targets
+  `{app}\scripts\start-console.cmd`, which then launches the PowerShell helper.
 - `LMIT-2 CLI Help`: opens the command-line help for advanced/manual use
 
 Use the web UI for day-to-day actions:
@@ -94,6 +95,21 @@ GEMINI_API_KEY=...
 
 The installer includes `.env.example` as a template. Copy or rename it to `.env`
 and fill in only the variables you use.
+
+## LM Studio
+
+For the default LM Studio profile, `Base URL` should be
+`http://localhost:1234/v1` when LM Studio's Local Server is running on port
+1234. The `Model` field must use the id returned by the API, not necessarily
+the model name shown in the download list. Use `Fetch Models` in the Web UI or
+run:
+
+```powershell
+Invoke-RestMethod http://localhost:1234/v1/models | ConvertTo-Json -Depth 5
+```
+
+If the request is refused, start LM Studio's Local Server, load a model, and
+confirm the port before changing LMIT-2 settings.
 
 ## Manual Verification
 

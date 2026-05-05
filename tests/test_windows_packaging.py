@@ -42,6 +42,8 @@ def test_inno_installer_defines_shortcuts_config_init_and_uninstall_cleanup():
     )
 
     assert "LMIT-2 Wiki Console" in text
+    assert 'Name: "{group}\\LMIT-2 Wiki Console"; Filename: "{app}\\scripts\\start-console.cmd"' in text
+    assert 'Name: "{autodesktop}\\LMIT-2 Wiki Console"; Filename: "{app}\\scripts\\start-console.cmd"' in text
     assert "LMIT-2 CLI Help" in text
     assert "init-windows-install.ps1" in text
     assert "remove-scheduled-tasks.ps1" in text
@@ -62,6 +64,7 @@ def test_windows_task_scripts_register_and_remove_scheduled_tasks():
     install_text = (scripts_dir / "install-scheduled-tasks.ps1").read_text(encoding="utf-8")
     remove_text = (scripts_dir / "remove-scheduled-tasks.ps1").read_text(encoding="utf-8")
     start_text = (scripts_dir / "start-console.ps1").read_text(encoding="utf-8")
+    cmd_text = (scripts_dir / "start-console.cmd").read_text(encoding="utf-8")
     init_text = (scripts_dir / "init-windows-install.ps1").read_text(encoding="utf-8")
     common_text = (scripts_dir / "config-common.ps1").read_text(encoding="utf-8")
 
@@ -72,9 +75,12 @@ def test_windows_task_scripts_register_and_remove_scheduled_tasks():
     assert "Unregister-ScheduledTask" in remove_text
     assert "127.0.0.1:8765" in start_text
     assert "Ensure-LmitWikiConfig" in start_text
+    assert "start-console.ps1" in cmd_text
     assert "UTF8Encoding($false)" in common_text
     assert "WriteAllText" in common_text
-    assert "Select-LmitFolder" not in common_text
-    assert "FolderBrowserDialog" not in common_text
+    assert "Select-LmitFolder" in common_text
+    assert "FolderBrowserDialog" in common_text
     assert "Invoke-LmitWikiInit" in init_text
     assert "[bool]$InstallTasks = $false" in init_text
+    assert "if ($InstallTasks)" in init_text
+    assert init_text.index("if ($InstallTasks)") < init_text.index("Write-LmitWikiConfig")

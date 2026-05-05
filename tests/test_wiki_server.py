@@ -41,6 +41,7 @@ def test_web_ui_exposes_llm_profile_controls_and_default_restore(tmp_path):
     assert "Add OpenAI" in html
     assert "Add Gemini" in html
     assert "Restore Defaults" in html
+    assert "Fetch Models" in html
 
     defaults = _call_json(app, "POST", "/api/settings/defaults")
     profile_ids = [profile["id"] for profile in defaults["profiles"]]
@@ -103,6 +104,27 @@ def test_web_ui_links_manual_and_exposes_path_controls(tmp_path):
     manual = _call_html(app, "GET", "/manual")
     assert "LMIT-2 Web UI 操作教學" in manual
     assert "Save Paths" in manual
+    assert "Fetch Models" in manual
+
+
+def test_web_ui_fetches_openai_compatible_model_ids(tmp_path, monkeypatch):
+    cfg = default_config(tmp_path)
+    app = WikiWebApp(cfg)
+
+    def fake_fetch(base_url: str) -> list[str]:
+        assert base_url == "http://localhost:1234/v1"
+        return ["google/gemma-4-e4b-it"]
+
+    monkeypatch.setattr("lmit_wiki.server._fetch_openai_compatible_models", fake_fetch)
+
+    payload = _call_json(
+        app,
+        "GET",
+        "/api/models",
+        query_string="base_url=http%3A%2F%2Flocalhost%3A1234%2Fv1",
+    )
+
+    assert payload["models"] == ["google/gemma-4-e4b-it"]
 
 
 def test_web_ui_uses_threaded_server_and_nonblocking_status():
@@ -110,7 +132,14 @@ def test_web_ui_uses_threaded_server_and_nonblocking_status():
     assert 'item.exists ? "yes" : "no"' not in INDEX_HTML
 
 
-def _call_json(app: WikiWebApp, method: str, path: str, payload: dict | None = None) -> dict:
+def _call_json(
+    app: WikiWebApp,
+    method: str,
+    path: str,
+    payload: dict | None = None,
+    *,
+    query_string: str = "",
+) -> dict:
     body = json.dumps(payload or {}).encode("utf-8") if method == "POST" else b""
     captured: dict[str, object] = {}
 
@@ -121,7 +150,7 @@ def _call_json(app: WikiWebApp, method: str, path: str, payload: dict | None = N
     environ = {
         "REQUEST_METHOD": method,
         "PATH_INFO": path,
-        "QUERY_STRING": "",
+        "QUERY_STRING": query_string,
         "CONTENT_LENGTH": str(len(body)),
         "wsgi.input": BytesIO(body),
     }

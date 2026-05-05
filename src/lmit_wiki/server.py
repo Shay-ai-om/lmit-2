@@ -4,7 +4,9 @@ from http import HTTPStatus
 from pathlib import Path
 from socketserver import ThreadingMixIn
 from threading import RLock
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs
+from urllib.request import Request, urlopen
 from wsgiref.simple_server import WSGIServer, make_server
 import json
 
@@ -166,6 +168,15 @@ class WikiWebApp:
                     start_response,
                     runtime_settings_public_payload(settings),
                 )
+            if method == "GET" and path == "/api/models":
+                query = parse_qs(environ.get("QUERY_STRING", ""))
+                base_url = query.get("base_url", [""])[0].strip()
+                if not base_url:
+                    raise ValueError("Base URL is required before fetching models.")
+                return self._json(
+                    start_response,
+                    {"models": _fetch_openai_compatible_models(base_url)},
+                )
             if method == "POST" and path == "/api/settings/defaults":
                 settings = save_runtime_settings(
                     self._current_cfg(),
@@ -260,6 +271,68 @@ def _payload_source_dirs(value: object) -> list[Path]:
         items = str(value or "").replace(";", "\n").splitlines()
         items = [item.strip() for item in items]
     return [Path(item) for item in items if item]
+
+
+def _fetch_openai_compatible_models(base_url: str, *, timeout_seconds: int = 8) -> list[str]:
+    url = _models_url(base_url)
+    request = Request(url, headers={"Accept": "application/json"}, method="GET")
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            charset = response.headers.get_content_charset("utf-8")
+            raw = response.read().decode(charset, errors="replace")
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:300]
+        raise RuntimeError(f"{url} returned HTTP {exc.code}: {body}") from exc
+    except URLError as exc:
+        reason = str(exc.reason)
+        raise RuntimeError(
+            f"Could not connect to {url}. Start the LM Studio Local Server, "
+            f"load a model, and confirm the port. Details: {reason}"
+        ) from exc
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{url} returned invalid JSON.") from exc
+    models = _model_ids_from_payload(payload)
+    if not models:
+        raise RuntimeError(f"{url} did not return any model ids.")
+    return models
+
+
+def _models_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/models"):
+        return normalized
+    return normalized + "/models"
+
+
+def _model_ids_from_payload(payload: object) -> list[str]:
+    if isinstance(payload, dict):
+        raw_models = payload.get("data")
+        if raw_models is None:
+            raw_models = payload.get("models")
+    else:
+        raw_models = payload
+    if not isinstance(raw_models, list):
+        return []
+
+    model_ids: list[str] = []
+    seen: set[str] = set()
+    for item in raw_models:
+        model_id = ""
+        if isinstance(item, str):
+            model_id = item
+        elif isinstance(item, dict):
+            for key in ("id", "model", "name", "path"):
+                value = item.get(key)
+                if value:
+                    model_id = str(value)
+                    break
+        model_id = model_id.strip()
+        if model_id and model_id not in seen:
+            model_ids.append(model_id)
+            seen.add(model_id)
+    return model_ids
 
 
 INDEX_HTML = """<!doctype html>
@@ -538,9 +611,10 @@ INDEX_HTML = """<!doctype html>
         <div>
           <h3>First Run</h3>
           <ol>
-            <li>Set <code>Knowledge Base Path</code> to the folder where LMIT-2 writes the wiki.</li>
-            <li>Set <code>Raw Source Paths</code> to the LMIT-1 raw Markdown folder. Use one line per source.</li>
+            <li>If no config exists yet, the launcher asks for the knowledge base and raw Markdown folders.</li>
+            <li>Inside the Web UI, you can still edit <code>Knowledge Base Path</code> and <code>Raw Source Paths</code>.</li>
             <li>Click <code>Save Paths</code>, then run <code>Ingest</code>.</li>
+            <li>For LM Studio, start its Local Server, then use <code>Fetch Models</code> to fill the model id.</li>
           </ol>
         </div>
         <div>
@@ -678,6 +752,10 @@ INDEX_HTML = """<!doctype html>
         <span>Base URL</span>
         <input data-field="base_url" placeholder="http://localhost:11434/api">
       </label>
+      <div class="toolbar">
+        <button class="secondary" onclick="fetchModels(this)">Fetch Models</button>
+      </div>
+      <div class="tiny" data-field="model_hint">For LM Studio, start the Local Server first, then fetch models and use the returned id.</div>
       <label class="field">
         <span>API Key Environment Variable</span>
         <input data-field="api_key_env" placeholder="OPENAI_API_KEY">
@@ -866,6 +944,35 @@ INDEX_HTML = """<!doctype html>
         return "GEMINI_API_KEY";
       }
       return "";
+    }
+
+    async function fetchModels(button) {
+      const node = button.closest(".profile");
+      const provider = node.querySelector('[data-field="provider"]').value;
+      const baseUrl = node.querySelector('[data-field="base_url"]').value.trim();
+      const modelInput = node.querySelector('[data-field="model"]');
+      const hint = node.querySelector('[data-field="model_hint"]');
+      if (provider !== "openai_compatible") {
+        hint.textContent = "Fetch Models currently supports LM Studio and other OpenAI-compatible endpoints.";
+        return;
+      }
+      if (!baseUrl) {
+        hint.textContent = "Enter a Base URL before fetching models.";
+        return;
+      }
+      try {
+        hint.textContent = "Fetching models...";
+        const data = await requestJson(`/api/models?base_url=${encodeURIComponent(baseUrl)}`, {}, 8);
+        const models = data.models || [];
+        if (!models.length) {
+          hint.textContent = "No models returned by this endpoint.";
+          return;
+        }
+        modelInput.value = models[0];
+        hint.textContent = `Models: ${models.join(", ")}`;
+      } catch (error) {
+        hint.textContent = `Model fetch failed: ${error.message}`;
+      }
     }
 
     function addProfile(kind) {
@@ -1164,9 +1271,9 @@ MANUAL_HTML = """<!doctype html>
       <h2>第一次啟動</h2>
       <ol>
         <li>開啟 <code>LMIT-2 Wiki Console</code>。</li>
-        <li>在 <code>Knowledge Base Path</code> 填入 LMIT-2 要保存 wiki 的資料夾。</li>
-        <li>在 <code>Raw Source Paths</code> 填入 LMIT-1 產出的 raw Markdown 資料夾；多個來源可一行一個。</li>
-        <li>按 <code>Save Paths</code>。LMIT-2 會寫回目前使用者的 <code>wiki-only.toml</code>，並初始化 knowledge base 目錄。</li>
+        <li>第一次啟動若還沒有 <code>%APPDATA%\\LMIT-2\\wiki-only.toml</code>，啟動器會先請你選擇 knowledge base 資料夾與 LMIT-1 raw Markdown 來源資料夾。</li>
+        <li>進入 Web UI 後，仍可在 <code>Knowledge Base Path</code> 與 <code>Raw Source Paths</code> 修改路徑。</li>
+        <li>按 <code>Save Paths</code>。LMIT-2 會寫回目前使用者的 <code>wiki-only.toml</code>，並初始化 knowledge base 目錄；它不會執行 Ingest，也不會呼叫任何 LLM。</li>
       </ol>
     </section>
     <section>
@@ -1185,9 +1292,19 @@ MANUAL_HTML = """<!doctype html>
         <li><code>Add LM Studio</code> 建立本機 OpenAI-compatible profile，預設使用 <code>http://localhost:1234/v1</code>，通常不需要 API key env。</li>
         <li><code>Add OpenAI</code> 或 <code>Add Gemini</code> 只保存環境變數名稱，不保存密鑰值。</li>
         <li>API key 可放在 Windows 使用者/系統環境變數，也可放在安裝資料夾的 <code>.env</code> 檔，例如 <code>OPENAI_API_KEY=...</code>。</li>
+        <li>LM Studio 的 <code>Model</code> 要填 API 回傳的 model id。先在 LM Studio 啟動 Local Server 並載入模型，再按 <code>Fetch Models</code>。</li>
+        <li>若 <code>Fetch Models</code> 顯示無法連線，通常是 LM Studio server 沒啟動、port 不是 1234，或被防火牆/權限擋住。</li>
         <li><code>Active Profile</code> 是優先使用的 profile；<code>Fallback Order</code> 是失敗時的備援順序。</li>
         <li>修改 profile 後必須按 <code>Save Settings</code>。</li>
         <li><code>Restore Defaults</code> 會重建預設 profile 清單。</li>
+      </ul>
+    </section>
+    <section>
+      <h2>LM Studio 原生 REST API</h2>
+      <ul>
+        <li>LM Studio 原生 REST API <code>/api/v1/*</code> 適合模型管理、載入/卸載、stateful chat 與 MCP。</li>
+        <li>LMIT-2 目前只需要一般 chat completion 與 citation workflow，所以先使用 OpenAI-compatible <code>/v1/chat/completions</code>。</li>
+        <li>之後若要在 Web UI 內管理 LM Studio 模型，再接原生 REST API 會更合適。</li>
       </ul>
     </section>
     <section>

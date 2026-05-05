@@ -12,12 +12,47 @@ function Show-LmitError {
     ) | Out-Null
 }
 
+function Show-LmitInfo {
+    param([Parameter(Mandatory=$true)][string]$Message)
+    [System.Windows.Forms.MessageBox]::Show(
+        $Message,
+        "LMIT-2 Wiki",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information
+    ) | Out-Null
+}
+
 function Get-LmitDocumentsPath {
     $documents = [Environment]::GetFolderPath("MyDocuments")
     if ([string]::IsNullOrWhiteSpace($documents)) {
         return (Join-Path $env:USERPROFILE "Documents")
     }
     return $documents
+}
+
+function Select-LmitFolder {
+    param(
+        [Parameter(Mandatory=$true)][string]$Description,
+        [Parameter(Mandatory=$true)][string]$DefaultPath
+    )
+
+    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dialog.Description = $Description
+    $dialog.ShowNewFolderButton = $true
+    if (Test-Path -LiteralPath $DefaultPath) {
+        $dialog.SelectedPath = $DefaultPath
+    }
+    else {
+        $parent = Split-Path -Parent $DefaultPath
+        if ($parent -and (Test-Path -LiteralPath $parent)) {
+            $dialog.SelectedPath = $parent
+        }
+    }
+
+    if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) {
+        throw "Folder selection cancelled."
+    }
+    return $dialog.SelectedPath
 }
 
 function Write-LmitWikiConfig {
@@ -101,10 +136,14 @@ function Ensure-LmitWikiConfig {
     $defaultKb = Join-Path $documents "LMIT-2\knowledge_base"
     $defaultRaw = Join-Path $documents "LMIT\output\raw"
 
+    Show-LmitInfo "Choose the LMIT-2 knowledge base folder, then choose the LMIT-1 raw Markdown source folder. You can change both later in the Web UI."
+    $kb = Select-LmitFolder -Description "Choose the LMIT-2 knowledge base folder." -DefaultPath $defaultKb
+    $raw = Select-LmitFolder -Description "Choose the LMIT-1 raw Markdown source folder." -DefaultPath $defaultRaw
+
     Write-LmitWikiConfig `
         -ConfigPath $ConfigPath `
-        -KnowledgeBaseRoot $defaultKb `
-        -RawSourceDir $defaultRaw `
+        -KnowledgeBaseRoot $kb `
+        -RawSourceDir $raw `
         -InstallTasks:$false
 
     $exe = Join-Path $InstallDir "lmit-wiki.exe"
