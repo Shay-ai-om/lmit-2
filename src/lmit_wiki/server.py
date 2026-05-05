@@ -4,13 +4,14 @@ from http import HTTPStatus
 from pathlib import Path
 from socketserver import ThreadingMixIn
 from threading import RLock
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 from wsgiref.simple_server import WSGIServer, make_server
 import json
 
 from lmit_wiki.builder import ingest_wiki, init_wiki, lint_wiki
 from lmit_wiki.config import AppConfig, load_config, write_local_config
 from lmit_wiki.auto import auto_sync_wiki
+from lmit_wiki.path_safety import ensure_within_root
 from lmit_wiki.query import answer_wiki_query
 from lmit_wiki.runtime import (
     default_runtime_settings_payload,
@@ -56,6 +57,17 @@ class WikiWebApp:
                 return self._html(start_response, INDEX_HTML)
             if method == "GET" and path == "/manual":
                 return self._html(start_response, MANUAL_HTML)
+            if method == "GET" and path == "/document":
+                query = parse_qs(environ.get("QUERY_STRING", ""))
+                rel_path = query.get("path", [""])[0].strip()
+                if not rel_path:
+                    raise ValueError("Document path is required.")
+                file_path = _resolve_document_path(self._current_cfg(), rel_path)
+                return self._text(
+                    start_response,
+                    file_path.read_text(encoding="utf-8", errors="ignore"),
+                    content_type="text/markdown; charset=utf-8",
+                )
             if method == "GET" and path == "/api/status":
                 return self._json(start_response, self._status_payload())
             if method == "POST" and path == "/api/config":
@@ -107,7 +119,7 @@ class WikiWebApp:
             if method == "GET" and path == "/api/search":
                 query = parse_qs(environ.get("QUERY_STRING", "")).get("q", [""])[0]
                 results = [
-                    search_result_payload(item)
+                    _search_result_payload(self._current_cfg(), item)
                     for item in search_wiki(self._current_cfg(), query, include_raw=True)
                 ]
                 return self._json(start_response, {"results": results})
@@ -126,7 +138,8 @@ class WikiWebApp:
                         "follow_up_questions": list(answer.follow_up_questions),
                         "saved_path": str(answer.saved_path) if answer.saved_path else None,
                         "search_results": [
-                            search_result_payload(item) for item in answer.search_results
+                            _search_result_payload(self._current_cfg(), item)
+                            for item in answer.search_results
                         ],
                         "llm": (
                             {
@@ -246,6 +259,24 @@ class WikiWebApp:
         )
         return [body]
 
+    def _text(
+        self,
+        start_response,
+        content: str,
+        *,
+        status=HTTPStatus.OK,
+        content_type: str = "text/plain; charset=utf-8",
+    ):
+        encoded = content.encode("utf-8")
+        start_response(
+            f"{status.value} {status.phrase}",
+            [
+                ("Content-Type", content_type),
+                ("Content-Length", str(len(encoded))),
+            ],
+        )
+        return [encoded]
+
     def _status_payload(self) -> dict[str, object]:
         cfg = self._current_cfg()
         source_dirs = [
@@ -280,6 +311,47 @@ def _payload_source_dirs(value: object) -> list[Path]:
         items = str(value or "").replace(";", "\n").splitlines()
         items = [item.strip() for item in items]
     return [Path(item) for item in items if item]
+
+
+def _search_result_payload(cfg: AppConfig, result) -> dict[str, object]:
+    payload = search_result_payload(result)
+    payload["document_url"] = _document_url(result.rel_path)
+    raw_rel_path = _raw_rel_path_for_result(cfg, result)
+    payload["raw_rel_path"] = raw_rel_path
+    payload["raw_url"] = _document_url(raw_rel_path) if raw_rel_path else None
+    return payload
+
+
+def _raw_rel_path_for_result(cfg: AppConfig, result) -> str | None:
+    if result.kind == "raw":
+        return result.rel_path
+
+    manifest_path = cfg.wiki.root_dir / "manifest.json"
+    if not manifest_path.exists():
+        return None
+
+    result_path = result.path.resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for record in manifest.get("sources", []):
+        raw_path = Path(str(record.get("raw_path", "")))
+        source_note_path = Path(str(record.get("source_note_path", "")))
+        if result_path == source_note_path.resolve():
+            stored = str(record.get("stored_raw_path") or "").strip()
+            return stored or raw_path.relative_to(cfg.wiki.root_dir).as_posix()
+    return None
+
+
+def _document_url(rel_path: str | None) -> str | None:
+    if not rel_path:
+        return None
+    return f"/document?path={quote(rel_path)}"
+
+
+def _resolve_document_path(cfg: AppConfig, rel_path: str) -> Path:
+    target = ensure_within_root(cfg.wiki.root_dir / Path(rel_path), cfg.wiki.root_dir)
+    if not target.exists() or not target.is_file():
+        raise FileNotFoundError(f"Document not found: {rel_path}")
+    return target
 
 
 INDEX_HTML = """<!doctype html>
@@ -734,7 +806,7 @@ INDEX_HTML = """<!doctype html>
         api_key_env: "",
         enabled: false,
         temperature: 0.2,
-        timeout_seconds: 120
+        timeout_seconds: 300
       },
       openai: {
         id: "openai-compatible",
@@ -756,7 +828,7 @@ INDEX_HTML = """<!doctype html>
         api_key_env: "",
         enabled: false,
         temperature: 0.2,
-        timeout_seconds: 120
+        timeout_seconds: 300
       },
       lmstudioRest: {
         id: "lm-studio-rest",
@@ -767,7 +839,7 @@ INDEX_HTML = """<!doctype html>
         api_key_env: "",
         enabled: false,
         temperature: 0.2,
-        timeout_seconds: 120
+        timeout_seconds: 300
       },
       gemini: {
         id: "gemini",
@@ -1064,7 +1136,19 @@ INDEX_HTML = """<!doctype html>
       for (const item of data.results || []) {
         const div = document.createElement("div");
         div.className = "result";
-        div.innerHTML = `<h3>${escapeHtml(item.title)}</h3><div class="meta">${escapeHtml(item.kind)} / ${escapeHtml(item.rel_path)} / score ${item.score}</div><div>${escapeHtml(item.snippet)}</div>`;
+        const links = [];
+        if (item.document_url) {
+          links.push(`<a class="button-link secondary" href="${escapeAttribute(item.document_url)}" target="_blank" rel="noopener">Open Result</a>`);
+        }
+        if (item.raw_url && item.raw_url !== item.document_url) {
+          links.push(`<a class="button-link secondary" href="${escapeAttribute(item.raw_url)}" target="_blank" rel="noopener">Open Raw</a>`);
+        }
+        div.innerHTML = `
+          <h3>${escapeHtml(item.title)}</h3>
+          <div class="meta">${escapeHtml(item.kind)} / ${escapeHtml(item.rel_path)} / score ${item.score}</div>
+          <div>${escapeHtml(item.snippet)}</div>
+          ${links.length ? `<div class="toolbar">${links.join("")}</div>` : ""}
+        `;
         root.appendChild(div);
       }
       status("searchStatus", `${(data.results || []).length} result(s).`);
@@ -1190,6 +1274,14 @@ INDEX_HTML = """<!doctype html>
         .replaceAll('"', "&quot;");
     }
 
+    function escapeAttribute(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
     boot();
   </script>
 </body>
@@ -1250,6 +1342,7 @@ MANUAL_HTML = """<!doctype html>
         <li><code>Ingest</code>：讀取 raw Markdown，複製成安全短檔名，產生 source notes、manifest 與 index。</li>
         <li><code>Lint</code>：檢查 knowledge base 必要目錄與索引是否存在。</li>
         <li><code>Search</code>：查詢已 ingest 的 source notes、raw copy 與 wiki 頁面。</li>
+        <li>搜尋結果可用 <code>Open Result</code> 打開目前文件；若結果對應 source note，還會出現 <code>Open Raw</code> 直接打開 raw markdown。</li>
         <li><code>Ask The Wiki</code>：根據目前 wiki 回答問題；<code>Ask And Save</code> 會把結果存入 <code>wiki/queries</code>。</li>
       </ol>
     </section>
@@ -1259,6 +1352,7 @@ MANUAL_HTML = """<!doctype html>
         <li><code>Add Ollama</code> 建立本機 Ollama profile；通常不需要 API key env。</li>
         <li><code>Add LM Studio</code> 建立本機 OpenAI-compatible profile，預設使用 <code>http://localhost:1234/v1</code>，通常不需要 API key env。</li>
         <li><code>Add LM Studio REST</code> 建立 LM Studio 原生 REST profile，預設使用 <code>http://localhost:1234/api/v1</code>；若你在 LM Studio 啟用了 API token，可填入對應環境變數名稱。</li>
+        <li>本機 LLM profile 預設 <code>Timeout Seconds</code> 為 300；慢模型或長上下文可再往上調。</li>
         <li><code>Add OpenAI</code> 或 <code>Add Gemini</code> 只保存環境變數名稱，不保存密鑰值。</li>
         <li>API key 可放在 Windows 使用者/系統環境變數，也可放在安裝資料夾的 <code>.env</code> 檔，例如 <code>OPENAI_API_KEY=...</code>。</li>
         <li>LM Studio 的 <code>Model</code> 要填 API 回傳的 model id 或 model key。先在 LM Studio 啟動 Local Server，再按 <code>Fetch Models</code>。</li>
@@ -1274,6 +1368,8 @@ MANUAL_HTML = """<!doctype html>
         <li>LM Studio 原生 REST API <code>/api/v1/*</code> 適合模型管理、載入/卸載、stateful chat 與 MCP。</li>
         <li>LMIT-2 現在同時支援 OpenAI-compatible <code>/v1/chat/completions</code> 與 LM Studio 原生 <code>/api/v1/chat</code>。</li>
         <li>如果 OpenAI-compatible profile 能列出模型但 query 仍回傳 <code>400</code>，可直接改用 <code>LM Studio REST</code> profile。</li>
+        <li>如果 query 回傳 <code>timed out</code>，先把該 profile 的 <code>Timeout Seconds</code> 提高，再重試。</li>
+        <li>如果 <code>Sync Now</code> 也回傳 <code>timed out</code>，處理方式相同，因為它使用同一組 LLM profile 與 timeout 設定。</li>
       </ul>
     </section>
     <section>
@@ -1292,6 +1388,8 @@ MANUAL_HTML = """<!doctype html>
         <li>Ingest 找不到資料時，檢查 <code>Raw Source Paths</code> 是否指向 LMIT-1 的 <code>output/raw</code>。</li>
         <li><code>Save Paths</code> 只儲存路徑與初始化 KB，不會執行 Ingest，也不會呼叫任何 LLM。</li>
         <li>如果按鈕顯示 timeout，通常是 server 未回應、路徑位於慢速/離線磁碟，或另一個長時間操作仍在執行。</li>
+        <li>如果只有 <code>Ask The Wiki</code> 超時，通常是目前模型太慢或 context 太大；優先提高 <code>Timeout Seconds</code> 或改用 <code>LM Studio REST</code>。</li>
+        <li>如果只有 <code>Sync Now</code> 超時，也先提高目前啟用 profile 的 <code>Timeout Seconds</code>。</li>
       </ul>
     </section>
   </main>

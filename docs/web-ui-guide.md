@@ -15,6 +15,7 @@
 1. `Ingest`：讀取 raw Markdown，複製成安全短檔名，產生 source notes、manifest 與 index。
 2. `Lint`：檢查 knowledge base 必要目錄與索引是否存在。
 3. `Search`：查詢已 ingest 的 source notes、raw copy 與 wiki 頁面。
+搜尋結果可直接點 `Open Result`，若該結果對應 source note，還會額外出現 `Open Raw` 連到 raw markdown。
 4. `Ask The Wiki`：根據目前 wiki 回答問題；`Ask And Save` 會把結果存入 `wiki/queries`。
 5. `Sync Now`：使用已啟用的 LLM profile 更新 topic/entity 頁面。
 
@@ -24,6 +25,7 @@
 - `Add LM Studio`：建立 LM Studio 的 OpenAI-compatible profile，預設 `Base URL` 是 `http://localhost:1234/v1`。
 - `Add LM Studio REST`：建立 LM Studio 原生 REST profile，預設 `Base URL` 是 `http://localhost:1234/api/v1`。
 - `Add OpenAI`、`Add Gemini`：建立外部 API profile。
+- 本機 LLM profile 預設 `Timeout Seconds` 是 `300`；慢模型可再往上調。
 - `Active Profile` 是優先使用的 profile；`Fallback Order` 是失敗時的備援順序。
 - `Save Settings` 只會儲存設定，不會直接呼叫 LLM。
 - Web UI 不再顯示 stored key 狀態；密鑰仍可從 Windows 環境變數或安裝資料夾 `.env` 讀取。
@@ -43,6 +45,9 @@ LM Studio 目前可用兩種接法：
 `Model` 欄位必須填 API 回傳的 model id 或 model key，不一定等於下載頁顯示名稱。
 
 如果 OpenAI-compatible profile 可以列出模型，但 `Ask The Wiki` 仍回傳 `400 Bad Request`，優先改用 `LM Studio REST` profile。
+
+如果 `Ask The Wiki` 顯示 `timed out`，先把目前 profile 的 `Timeout Seconds` 提高，再重試。
+`Sync Now` 若顯示 `timed out`，處理方式相同，因為它使用同一組 LLM profile 與 timeout 設定。
 
 ## API Keys
 

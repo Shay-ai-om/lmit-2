@@ -32,6 +32,15 @@ class LLMInvocationError(RuntimeError):
     """Raised when every configured provider fails."""
 
 
+DEFAULT_REMOTE_TIMEOUT_SECONDS = 120
+DEFAULT_LOCAL_TIMEOUT_SECONDS = 300
+DEFAULT_LOCAL_PROFILE_IDS = {
+    "ollama-local",
+    "lm-studio-local",
+    "lm-studio-rest",
+}
+
+
 @dataclass(frozen=True)
 class LLMProfile:
     profile_id: str
@@ -103,7 +112,7 @@ def default_runtime_settings_payload() -> dict[str, Any]:
                 "api_key_env": "",
                 "enabled": False,
                 "temperature": 0.2,
-                "timeout_seconds": 120,
+                "timeout_seconds": DEFAULT_LOCAL_TIMEOUT_SECONDS,
             },
             {
                 "id": "lm-studio-local",
@@ -114,7 +123,7 @@ def default_runtime_settings_payload() -> dict[str, Any]:
                 "api_key_env": "",
                 "enabled": False,
                 "temperature": 0.2,
-                "timeout_seconds": 120,
+                "timeout_seconds": DEFAULT_LOCAL_TIMEOUT_SECONDS,
             },
             {
                 "id": "lm-studio-rest",
@@ -125,7 +134,7 @@ def default_runtime_settings_payload() -> dict[str, Any]:
                 "api_key_env": "",
                 "enabled": False,
                 "temperature": 0.2,
-                "timeout_seconds": 120,
+                "timeout_seconds": DEFAULT_LOCAL_TIMEOUT_SECONDS,
             },
             {
                 "id": "openai-compatible",
@@ -136,7 +145,7 @@ def default_runtime_settings_payload() -> dict[str, Any]:
                 "api_key_env": "OPENAI_API_KEY",
                 "enabled": False,
                 "temperature": 0.2,
-                "timeout_seconds": 120,
+                "timeout_seconds": DEFAULT_REMOTE_TIMEOUT_SECONDS,
             },
             {
                 "id": "gemini",
@@ -147,7 +156,7 @@ def default_runtime_settings_payload() -> dict[str, Any]:
                 "api_key_env": "GEMINI_API_KEY",
                 "enabled": False,
                 "temperature": 0.2,
-                "timeout_seconds": 120,
+                "timeout_seconds": DEFAULT_REMOTE_TIMEOUT_SECONDS,
             },
         ],
     }
@@ -428,7 +437,12 @@ def _profile_from_payload(payload: dict[str, Any]) -> LLMProfile:
         api_key=legacy_api_key,
         enabled=bool(payload.get("enabled", True)),
         temperature=float(payload.get("temperature", 0.2)),
-        timeout_seconds=max(1, int(payload.get("timeout_seconds", 90))),
+        timeout_seconds=_normalized_timeout_seconds(
+            payload.get("timeout_seconds"),
+            profile_id=profile_id,
+            provider=provider,
+            base_url=base_url,
+        ),
     )
 
 
@@ -597,6 +611,8 @@ def _post_json(
         raise RuntimeSettingsError(_http_error_message(url, exc)) from exc
     except URLError as exc:
         raise RuntimeSettingsError(_network_error_message(url, exc)) from exc
+    except TimeoutError as exc:
+        raise RuntimeSettingsError(_timeout_error_message(url, timeout_seconds)) from exc
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -618,6 +634,8 @@ def _get_json(
         raise RuntimeSettingsError(_http_error_message(url, exc)) from exc
     except URLError as exc:
         raise RuntimeSettingsError(_network_error_message(url, exc)) from exc
+    except TimeoutError as exc:
+        raise RuntimeSettingsError(_timeout_error_message(url, timeout_seconds)) from exc
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -728,6 +746,41 @@ def _json_headers(profile: LLMProfile) -> dict[str, str]:
     return headers
 
 
+def _normalized_timeout_seconds(
+    raw_value: object,
+    *,
+    profile_id: str,
+    provider: str,
+    base_url: str,
+) -> int:
+    default_timeout = _default_timeout_seconds(provider, base_url)
+    if raw_value in (None, ""):
+        return default_timeout
+
+    timeout = max(1, int(raw_value))
+    if (
+        timeout == DEFAULT_REMOTE_TIMEOUT_SECONDS
+        and profile_id in DEFAULT_LOCAL_PROFILE_IDS
+        and not _provider_is_remote(provider, base_url)
+    ):
+        return DEFAULT_LOCAL_TIMEOUT_SECONDS
+    return timeout
+
+
+def _default_timeout_seconds(provider: str, base_url: str) -> int:
+    if _provider_is_remote(provider, base_url):
+        return DEFAULT_REMOTE_TIMEOUT_SECONDS
+    return DEFAULT_LOCAL_TIMEOUT_SECONDS
+
+
+def _provider_is_remote(provider: str, base_url: str) -> bool:
+    if provider in {"ollama", "lmstudio_rest"}:
+        return False
+    if provider == "openai_compatible":
+        return not _is_local_base_url(base_url)
+    return provider == "gemini"
+
+
 def _lmstudio_rest_prompt(messages: list[dict[str, str]]) -> tuple[str, str]:
     system_parts: list[str] = []
     dialogue_parts: list[str] = []
@@ -813,6 +866,16 @@ def _http_error_message(url: str, exc: HTTPError) -> str:
 
 def _network_error_message(url: str, exc: URLError) -> str:
     return f"Could not connect to {url}: {exc.reason}"
+
+
+def _timeout_error_message(url: str, timeout_seconds: int) -> str:
+    hint = f"Request to {url} timed out after {timeout_seconds} seconds."
+    if _looks_like_lmstudio_openai_url(url) or "/api/v1/" in url:
+        return (
+            f"{hint} Increase Timeout Seconds for this profile, or switch to "
+            "LM Studio REST if the OpenAI-compatible path is slow on this model."
+        )
+    return f"{hint} Increase Timeout Seconds for this profile and try again."
 
 
 def _error_detail_from_text(text: str) -> str:

@@ -258,6 +258,44 @@ def test_runtime_public_payload_does_not_expose_stored_key_status(tmp_path, monk
     assert "api_key_masked" not in payload["profiles"][0]
 
 
+def test_default_local_profile_timeout_is_upgraded_to_300_seconds(tmp_path):
+    cfg = default_config(tmp_path)
+    init_wiki(cfg)
+
+    save_runtime_settings(
+        cfg,
+        {
+            "active_profile": "lm-studio-local",
+            "fallback_order": ["lm-studio-local", "lm-studio-rest"],
+            "profiles": [
+                {
+                    "id": "lm-studio-local",
+                    "provider": "openai_compatible",
+                    "label": "LM Studio Local",
+                    "base_url": "http://localhost:1234/v1",
+                    "model": "local-model",
+                    "enabled": True,
+                    "timeout_seconds": 120,
+                },
+                {
+                    "id": "lm-studio-rest",
+                    "provider": "lmstudio_rest",
+                    "label": "LM Studio REST",
+                    "base_url": "http://localhost:1234/api/v1",
+                    "model": "local-model",
+                    "enabled": True,
+                    "timeout_seconds": 120,
+                },
+            ],
+        },
+    )
+
+    settings = load_runtime_settings(cfg)
+
+    assert settings.profiles[0].timeout_seconds == 300
+    assert settings.profiles[1].timeout_seconds == 300
+
+
 def test_openai_compatible_lmstudio_errors_include_rest_hint(tmp_path, monkeypatch):
     cfg = default_config(tmp_path)
     init_wiki(cfg)
@@ -295,6 +333,51 @@ def test_openai_compatible_lmstudio_errors_include_rest_hint(tmp_path, monkeypat
     else:
         raise AssertionError("expected invoke_text_completion to fail")
 
+    assert "LM Studio REST" in message
+
+
+def test_lmstudio_timeout_message_suggests_longer_timeout(tmp_path, monkeypatch):
+    cfg = default_config(tmp_path)
+    init_wiki(cfg)
+    save_runtime_settings(
+        cfg,
+        {
+            "active_profile": "lm-studio",
+            "fallback_order": ["lm-studio"],
+            "profiles": [
+                {
+                    "id": "lm-studio",
+                    "provider": "openai_compatible",
+                    "label": "LM Studio",
+                    "base_url": "http://localhost:1234/v1",
+                    "model": "slow-model",
+                    "enabled": True,
+                    "timeout_seconds": 300,
+                }
+            ],
+        },
+    )
+
+    def fake_post_json(url, headers, payload, *, timeout_seconds):
+        raise RuntimeSettingsError(
+            "Request to http://localhost:1234/v1/chat/completions timed out after 300 seconds. "
+            "Increase Timeout Seconds for this profile, or switch to LM Studio REST if the OpenAI-compatible path is slow on this model."
+        )
+
+    monkeypatch.setattr("lmit_wiki.runtime._post_json", fake_post_json)
+
+    try:
+        invoke_text_completion(
+            cfg,
+            [{"role": "user", "content": "hello"}],
+            purpose="lm studio timeout test",
+        )
+    except Exception as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected invoke_text_completion to fail")
+
+    assert "Increase Timeout Seconds" in message
     assert "LM Studio REST" in message
 
 

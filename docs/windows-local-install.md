@@ -122,6 +122,10 @@ HTTP 400, prefer the `LM Studio REST` profile. If either request is refused,
 start LM Studio's Local Server and confirm the port before changing LMIT-2
 settings.
 
+Local LM Studio and Ollama profiles now default to `Timeout Seconds = 300`.
+If `Ask The Wiki` still fails with `timed out`, increase that value further for
+the active profile before retrying.
+
 ## Manual Verification
 
 After installing on a clean Windows machine:

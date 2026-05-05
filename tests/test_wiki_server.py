@@ -31,6 +31,24 @@ def test_web_ui_exposes_status_ingest_and_lint(tmp_path):
     assert lint_payload["warnings"] == []
 
 
+def test_web_ui_search_results_include_document_and_raw_links(tmp_path):
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "source.md").write_text("# Source\n\nOpenClaw raw source body.", encoding="utf-8")
+
+    cfg = default_config(tmp_path)
+    app = WikiWebApp(cfg)
+    _call_json(app, "POST", "/api/ingest")
+
+    payload = _call_json(app, "GET", "/api/search", query_string="q=OpenClaw")
+
+    assert payload["results"]
+    first = payload["results"][0]
+    assert first["document_url"].startswith("/document?path=")
+    if first["kind"] == "source":
+        assert first["raw_url"]
+
+
 def test_web_ui_exposes_llm_profile_controls_and_default_restore(tmp_path):
     cfg = default_config(tmp_path)
     app = WikiWebApp(cfg)
@@ -57,6 +75,8 @@ def test_web_ui_exposes_llm_profile_controls_and_default_restore(tmp_path):
     lm_studio_rest = defaults["profiles"][2]
     assert lm_studio["base_url"] == "http://localhost:1234/v1"
     assert lm_studio_rest["base_url"] == "http://localhost:1234/api/v1"
+    assert lm_studio["timeout_seconds"] == 300
+    assert lm_studio_rest["timeout_seconds"] == 300
     assert lm_studio["api_key_env"] == ""
     assert defaults["active_profile"] == "ollama-local"
 
@@ -112,6 +132,35 @@ def test_web_ui_links_manual_and_exposes_path_controls(tmp_path):
     assert "LM Studio REST" in manual
 
 
+def test_document_route_serves_wiki_markdown_and_blocks_missing_paths(tmp_path):
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "source.md").write_text("# Raw Title\n\nOpenClaw raw body.", encoding="utf-8")
+
+    cfg = default_config(tmp_path)
+    app = WikiWebApp(cfg)
+    _call_json(app, "POST", "/api/ingest")
+
+    search_payload = _call_json(app, "GET", "/api/search", query_string="q=OpenClaw")
+    raw_item = next(item for item in search_payload["results"] if item["kind"] == "raw")
+    document_html = _call_text(
+        app,
+        "GET",
+        "/document",
+        query_string=raw_item["document_url"].split("?", 1)[1],
+    )
+
+    assert "OpenClaw raw body." in document_html
+    error_payload = _call_json(
+        app,
+        "GET",
+        "/document",
+        query_string="path=..%2Foutside.md",
+        expect_ok=False,
+    )
+    assert "error" in error_payload
+
+
 def test_web_ui_fetches_model_choices_for_supported_providers(tmp_path, monkeypatch):
     cfg = default_config(tmp_path)
     app = WikiWebApp(cfg)
@@ -150,6 +199,7 @@ def _call_json(
     payload: dict | None = None,
     *,
     query_string: str = "",
+    expect_ok: bool = True,
 ) -> dict:
     body = json.dumps(payload or {}).encode("utf-8") if method == "POST" else b""
     captured: dict[str, object] = {}
@@ -167,7 +217,10 @@ def _call_json(
     }
 
     response_body = b"".join(app(environ, start_response))
-    assert str(captured["status"]).startswith("200 ")
+    if expect_ok:
+        assert str(captured["status"]).startswith("200 ")
+    else:
+        assert not str(captured["status"]).startswith("200 ")
     return json.loads(response_body.decode("utf-8"))
 
 
@@ -182,6 +235,32 @@ def _call_html(app: WikiWebApp, method: str, path: str) -> str:
         "REQUEST_METHOD": method,
         "PATH_INFO": path,
         "QUERY_STRING": "",
+        "CONTENT_LENGTH": "0",
+        "wsgi.input": BytesIO(b""),
+    }
+
+    response_body = b"".join(app(environ, start_response))
+    assert str(captured["status"]).startswith("200 ")
+    return response_body.decode("utf-8")
+
+
+def _call_text(
+    app: WikiWebApp,
+    method: str,
+    path: str,
+    *,
+    query_string: str = "",
+) -> str:
+    captured: dict[str, object] = {}
+
+    def start_response(status: str, headers: list[tuple[str, str]]) -> None:
+        captured["status"] = status
+        captured["headers"] = headers
+
+    environ = {
+        "REQUEST_METHOD": method,
+        "PATH_INFO": path,
+        "QUERY_STRING": query_string,
         "CONTENT_LENGTH": "0",
         "wsgi.input": BytesIO(b""),
     }
