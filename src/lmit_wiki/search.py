@@ -34,6 +34,8 @@ class SearchResult:
 def load_wiki_documents(cfg: AppConfig, *, include_raw: bool = True) -> list[WikiDocument]:
     docs: list[WikiDocument] = []
     docs.extend(_load_dir(cfg.wiki.sources_dir, cfg.wiki.root_dir, "source"))
+    docs.extend(_load_dir(cfg.wiki.root_dir / "wiki" / "system", cfg.wiki.root_dir, "system"))
+    docs.extend(_load_dir(cfg.wiki.root_dir / "wiki" / "hubs", cfg.wiki.root_dir, "hub"))
     docs.extend(_load_dir(cfg.wiki.topics_dir, cfg.wiki.root_dir, "topic"))
     docs.extend(_load_dir(cfg.wiki.entities_dir, cfg.wiki.root_dir, "entity"))
     docs.extend(_load_dir(cfg.wiki.queries_dir, cfg.wiki.root_dir, "query"))
@@ -157,7 +159,7 @@ def _score_document(doc: WikiDocument, query: str, units: list[str]) -> float:
         count = body.count(unit)
         if count:
             score += min(count, 6) * 2.2
-    if doc.kind in {"topic", "entity", "query"}:
+    if doc.kind in {"hub", "topic", "entity", "query"}:
         score += 1.2
     return score
 

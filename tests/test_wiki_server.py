@@ -3,6 +3,7 @@ from __future__ import annotations
 from io import BytesIO
 import json
 import time
+from pathlib import Path
 from threading import Event
 
 from lmit_wiki.query import QueryAnswer
@@ -26,7 +27,7 @@ def test_web_ui_exposes_status_ingest_and_lint(tmp_path):
     assert status_payload["root_exists"] is None
     assert status_payload["source_dir_status"][0]["exists"] is None
 
-    ingest_payload = _call_json(app, "POST", "/api/ingest")
+    ingest_payload = _call_json(app, "POST", "/api/ingest", {"confirm_fallback": True})
     assert ingest_payload["source_count"] == 1
     assert ingest_payload["copied_raw_count"] == 1
     assert ingest_payload["source_note_count"] == 1
@@ -36,6 +37,25 @@ def test_web_ui_exposes_status_ingest_and_lint(tmp_path):
     assert lint_payload["warnings"] == []
 
 
+def test_web_ui_ingest_requires_confirmation_when_no_llm_is_enabled(tmp_path):
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "source.md").write_text("# Source\n\nFallback ingest.", encoding="utf-8")
+
+    cfg = default_config(tmp_path)
+    app = WikiWebApp(cfg)
+
+    warning = _call_json(app, "POST", "/api/ingest", expect_ok=False)
+
+    assert warning["requires_confirmation"] is True
+    assert warning["ingest_mode"] == "fallback"
+
+    confirmed = _call_json(app, "POST", "/api/ingest", {"confirm_fallback": True})
+
+    assert confirmed["ingest_mode"] == "fallback"
+    assert Path(confirmed["source_catalog_path"]).as_posix().endswith("wiki/system/sources.md")
+
+
 def test_web_ui_search_results_include_document_and_raw_links(tmp_path):
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
@@ -43,7 +63,7 @@ def test_web_ui_search_results_include_document_and_raw_links(tmp_path):
 
     cfg = default_config(tmp_path)
     app = WikiWebApp(cfg)
-    _call_json(app, "POST", "/api/ingest")
+    _call_json(app, "POST", "/api/ingest", {"confirm_fallback": True})
 
     payload = _call_json(app, "GET", "/api/search", query_string="q=OpenClaw")
 
@@ -212,6 +232,18 @@ def test_web_ui_links_manual_and_exposes_path_controls(tmp_path):
     assert "LiteLLM" in manual
 
 
+def test_web_ui_mentions_ingest_warning_and_source_catalog(tmp_path):
+    cfg = default_config(tmp_path)
+    app = WikiWebApp(cfg)
+
+    html = _call_html(app, "GET", "/")
+
+    assert "configure an LLM first" in html
+    assert "continue with fallback ingest" in html
+    assert "Source Catalog" in html
+    assert "confirm_fallback" in html
+
+
 def test_web_ui_script_keeps_newline_escape_sequences():
     assert 'buffer.indexOf("\\n")' in INDEX_HTML
     assert 'split(/\\r?\\n|;/)' in INDEX_HTML
@@ -241,7 +273,7 @@ def test_document_route_serves_wiki_markdown_and_blocks_missing_paths(tmp_path):
 
     cfg = default_config(tmp_path)
     app = WikiWebApp(cfg)
-    _call_json(app, "POST", "/api/ingest")
+    _call_json(app, "POST", "/api/ingest", {"confirm_fallback": True})
 
     search_payload = _call_json(app, "GET", "/api/search", query_string="q=OpenClaw")
     raw_item = next(item for item in search_payload["results"] if item["kind"] == "raw")

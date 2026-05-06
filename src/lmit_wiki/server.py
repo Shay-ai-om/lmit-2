@@ -21,6 +21,7 @@ from lmit_wiki.query import answer_wiki_query, stream_wiki_query_answer
 from lmit_wiki.runtime import (
     default_runtime_settings_payload,
     fetch_model_choices,
+    has_enabled_llm_profiles,
     load_runtime_settings,
     merge_runtime_settings_payload,
     runtime_settings_public_payload,
@@ -356,7 +357,26 @@ class WikiWebApp:
                     self.cfg = load_config(self.config_path)
                 return self._json(start_response, self._status_payload())
             if method == "POST" and path == "/api/ingest":
-                result = ingest_wiki(self._current_cfg())
+                payload = self._read_json(environ)
+                cfg = self._current_cfg()
+                confirm_fallback = bool(payload.get("confirm_fallback"))
+                ingest_mode = "standard"
+                if not has_enabled_llm_profiles(cfg):
+                    ingest_mode = "fallback"
+                    if not confirm_fallback:
+                        return self._json(
+                            start_response,
+                            {
+                                "requires_confirmation": True,
+                                "ingest_mode": ingest_mode,
+                                "warning": (
+                                    "No enabled LLM profile is configured yet. "
+                                    "Configure an LLM first for a curated wiki, or continue with fallback ingest."
+                                ),
+                            },
+                            status=HTTPStatus.CONFLICT,
+                        )
+                result = ingest_wiki(cfg, ingest_mode=ingest_mode)
                 return self._json(
                     start_response,
                     {
@@ -364,7 +384,9 @@ class WikiWebApp:
                         "copied_raw_count": result.copied_raw_count,
                         "source_note_count": result.source_note_count,
                         "index_path": str(result.index_path),
+                        "source_catalog_path": str(result.source_catalog_path),
                         "log_path": str(result.log_path),
+                        "ingest_mode": result.ingest_mode,
                     },
                 )
             if method == "POST" and path == "/api/lint":
@@ -1098,6 +1120,7 @@ INDEX_HTML = """<!doctype html>
             </label>
           </div>
           <div id="kbStatusPanel" class="path-list"></div>
+          <div class="tiny">If no LLM profile is enabled, Ingest will ask whether you want to configure an LLM first or continue with fallback ingest. Imported sources will still be tracked in the Source Catalog.</div>
         </div>
         <div class="toolbar">
           <button onclick="savePaths()">Save Paths</button>
@@ -1862,26 +1885,45 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
-    async function runIngest() {
-      status("ingestStatus", "Ingesting...");
-      const response = await fetch("/api/ingest", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}"
-      });
-      const data = await response.json();
+    async function runIngest(options = {}) {
       const root = document.getElementById("ingestOutput");
       root.innerHTML = "";
-      if (data.error) {
-        status("ingestStatus", data.error);
+      status("ingestStatus", options.confirmFallback ? "Ingesting with fallback mode..." : "Ingesting...");
+      let response;
+      try {
+        response = await fetch("/api/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            confirm_fallback: Boolean(options.confirmFallback)
+          })
+        });
+      } catch (error) {
+        status("ingestStatus", `Ingest failed to start: ${error.message}`);
+        return;
+      }
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (data.requires_confirmation) {
+          const proceed = window.confirm(
+            data.warning || "No enabled LLM profile is configured yet. Continue with fallback ingest?"
+          );
+          if (!proceed) {
+            status("ingestStatus", "Ingest cancelled so you can configure an LLM first.");
+            return;
+          }
+          await runIngest({ confirmFallback: true });
+          return;
+        }
+        status("ingestStatus", data.error || `${response.status} ${response.statusText}`);
         return;
       }
       const summary = document.createElement("div");
       summary.className = "result";
-      summary.innerHTML = `<h3>Ingest Summary</h3><div class="meta">sources ${data.source_count} / raw copies ${data.copied_raw_count} / source notes ${data.source_note_count}</div><div class="tiny">${escapeHtml(data.index_path || "")}</div>`;
+      summary.innerHTML = `<h3>Ingest Summary</h3><div class="meta">sources ${data.source_count} / raw copies ${data.copied_raw_count} / source notes ${data.source_note_count} / mode ${escapeHtml(data.ingest_mode || "standard")}</div><div class="tiny">${escapeHtml(data.index_path || "")}</div><div class="tiny">${escapeHtml(data.source_catalog_path || "")}</div>`;
       root.appendChild(summary);
       await loadStatus();
-      status("ingestStatus", "Ingest complete.");
+      status("ingestStatus", data.ingest_mode === "fallback" ? "Fallback ingest complete." : "Ingest complete.");
     }
 
     async function runLint() {
@@ -2061,13 +2103,18 @@ MANUAL_HTML = """<!doctype html>
     <section>
       <h2>日常流程</h2>
       <ol>
-        <li><code>Ingest</code>：讀取 raw Markdown，複製成安全短檔名，產生 source notes、manifest 與 index。</li>
+        <li><code>Ingest</code>：讀取 raw Markdown，複製成安全短檔名，產生 source notes、manifest、精簡首頁與 <code>Source Catalog</code>。</li>
+        <li>若目前沒有啟用任何 LLM profile，<code>Ingest</code> 會先跳出警示。你可以先去設定 LLM，或明確選擇 fallback ingest。</li>
+        <li>fallback ingest 仍會保存 raw/source note/manifest traceability，但首頁不會退化成整頁 source dump。</li>
+        <li><code>wiki/index.md</code> 現在會保留目前的 curation 狀態；fallback ingest 後仍會顯示 pre-curation 提示，不會在下一次 refresh 時遺失。</li>
+        <li>首頁也會顯示最近一次 sync 摘要與最近的 query pages，讓它更像真正的 wiki 首頁，而不是靜態檔案總表。</li>
+        <li>系統也會自動維護三個 hub pages：<code>Knowledge Map</code>、<code>Recent Work</code>、<code>Open Questions</code>，作為更高信號的導航層。</li>
         <li><code>Lint</code>：檢查 knowledge base 必要目錄與索引是否存在。</li>
         <li><code>Search</code>：查詢已 ingest 的 source notes、raw copy 與 wiki 頁面。</li>
         <li>搜尋結果可用 <code>Open Result</code> 打開目前文件；若結果對應 source note，還會出現 <code>Open Raw</code> 直接打開 raw markdown。</li>
         <li><code>Ask The Wiki</code>：根據目前 wiki 回答問題；<code>Ask And Save</code> 會把結果存入 <code>wiki/queries</code>。</li>
         <li><code>Ask The Wiki</code> 現在會串流顯示答案，只要模型已開始輸出 token，畫面就會持續更新。</li>
-        <li><code>Sync Now</code>：背景執行 LLM auto sync，Web UI 會顯示目前 source、已處理數量與完成結果。</li>
+        <li><code>Sync Now</code>：背景執行 LLM auto sync，把已 ingest 的素材提升成 topic/entity pages，並更新首頁訊號。</li>
         <li><code>Stop Sync</code>：要求目前背景 sync 在當前 source 完成後停止，不會回滾已完成的 page update。</li>
         <li><code>Resume Sync</code>：從下一筆未完成 source 繼續，不會重跑已成功完成的 source。</li>
       </ol>
