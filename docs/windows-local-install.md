@@ -138,6 +138,7 @@ lmit-wiki.exe init --config "$env:APPDATA\LMIT-2\wiki-only.toml"
 lmit-wiki.exe ingest --config "$env:APPDATA\LMIT-2\wiki-only.toml"
 lmit-wiki.exe search --config "$env:APPDATA\LMIT-2\wiki-only.toml" "openclaw"
 lmit-wiki.exe lint --config "$env:APPDATA\LMIT-2\wiki-only.toml"
+lmit-wiki.exe stop --config "$env:APPDATA\LMIT-2\wiki-only.toml"
 ```
 
 Then open:

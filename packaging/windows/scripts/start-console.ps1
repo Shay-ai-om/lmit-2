@@ -49,10 +49,11 @@ $stdoutPath = Join-Path $logDir "serve.stdout.log"
 $stderrPath = Join-Path $logDir "serve.stderr.log"
 $launcherPath = Join-Path $logDir "console-launcher.log"
 [System.IO.File]::WriteAllText($launcherPath, "", [System.Text.UTF8Encoding]::new($false))
+$serverArguments = "serve --config $(Quote-Argument $ConfigPath) --host 127.0.0.1 --port 8765"
 
 $serverProcess = Start-Process `
     -FilePath $ExePath `
-    -ArgumentList @("serve", "--config", $ConfigPath, "--host", "127.0.0.1", "--port", "8765") `
+    -ArgumentList $serverArguments `
     -WorkingDirectory $InstallDir `
     -WindowStyle Hidden `
     -RedirectStandardOutput $stdoutPath `
@@ -61,7 +62,7 @@ $serverProcess = Start-Process `
 
 [System.IO.File]::AppendAllText(
     $launcherPath,
-    "Started lmit-wiki.exe serve with config $ConfigPath at $([DateTime]::UtcNow.ToString('o'))`r`n",
+    "Started lmit-wiki.exe $serverArguments at $([DateTime]::UtcNow.ToString('o'))`r`n",
     [System.Text.UTF8Encoding]::new($false)
 )
 

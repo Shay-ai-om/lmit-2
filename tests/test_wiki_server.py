@@ -8,7 +8,7 @@ from threading import Event
 from lmit_wiki.query import QueryAnswer
 from lmit_wiki.config import default_config, load_config, write_local_config
 from lmit_wiki.auto import AutoSyncResult, SyncedPage
-from lmit_wiki.server import INDEX_HTML, ThreadingWSGIServer, WikiWebApp
+from lmit_wiki.server import INDEX_HTML, ThreadingWSGIServer, WikiWebApp, server_pid_path, stop_wiki_ui
 
 
 def test_web_ui_exposes_status_ingest_and_lint(tmp_path):
@@ -319,6 +319,32 @@ def test_web_ui_fetches_model_choices_for_supported_providers(tmp_path, monkeypa
 def test_web_ui_uses_threaded_server_and_nonblocking_status():
     assert ThreadingWSGIServer.daemon_threads is True
     assert 'item.exists ? "yes" : "no"' not in INDEX_HTML
+
+
+def test_stop_wiki_ui_uses_pid_file_from_config_dir(tmp_path, monkeypatch):
+    config_path = tmp_path / "cfg" / "wiki-only.toml"
+    cfg = write_local_config(
+        config_path,
+        root_dir=tmp_path / "kb",
+        source_dirs=[tmp_path / "raw"],
+    )
+    pid_path = server_pid_path(cfg, config_path=config_path)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text("43210", encoding="utf-8")
+    seen: dict[str, int] = {}
+
+    def fake_kill(pid: int, sig: int) -> None:
+        seen["pid"] = pid
+        seen["sig"] = sig
+
+    monkeypatch.setattr("lmit_wiki.server.os.kill", fake_kill)
+
+    stopped, message = stop_wiki_ui(cfg, config_path=config_path)
+
+    assert stopped is True
+    assert "43210" in message
+    assert seen == {"pid": 43210, "sig": 15}
+    assert not pid_path.exists()
 
 
 def _call_json(

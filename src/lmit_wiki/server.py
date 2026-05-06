@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http import HTTPStatus
+import os
 from pathlib import Path
 from queue import Queue
 from socketserver import ThreadingMixIn
@@ -173,9 +174,49 @@ def serve_wiki_ui(
     host = host or cfg.wiki_runtime.serve_host
     port = port or cfg.wiki_runtime.serve_port
     app = WikiWebApp(cfg, config_path=config_path)
+    pid_path = server_pid_path(cfg, config_path=config_path)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
     with make_server(host, port, app, server_class=ThreadingWSGIServer) as server:
-        print(f"Wiki UI: http://{host}:{port}")
-        server.serve_forever()
+        pid_path.write_text(str(os.getpid()), encoding="utf-8")
+        try:
+            print(f"Wiki UI: http://{host}:{port}")
+            server.serve_forever()
+        finally:
+            if pid_path.exists():
+                pid_path.unlink()
+
+
+def stop_wiki_ui(
+    cfg: AppConfig | None = None,
+    *,
+    config_path: Path | None = None,
+    pid: int | None = None,
+) -> tuple[bool, str]:
+    pid_path = server_pid_path(cfg, config_path=config_path)
+    target_pid = pid
+    if target_pid is None:
+        if not pid_path.exists():
+            return False, f"Wiki UI pid file not found: {pid_path}"
+        raw_pid = pid_path.read_text(encoding="utf-8").strip()
+        if not raw_pid:
+            pid_path.unlink(missing_ok=True)
+            return False, f"Wiki UI pid file was empty and has been removed: {pid_path}"
+        try:
+            target_pid = int(raw_pid)
+        except ValueError:
+            pid_path.unlink(missing_ok=True)
+            return False, f"Wiki UI pid file was invalid and has been removed: {pid_path}"
+
+    try:
+        os.kill(target_pid, 15)
+    except ProcessLookupError:
+        pid_path.unlink(missing_ok=True)
+        return False, f"Wiki UI process {target_pid} was not running. Removed stale pid file."
+    except PermissionError as exc:
+        return False, f"Could not stop Wiki UI process {target_pid}: {exc}"
+
+    pid_path.unlink(missing_ok=True)
+    return True, f"Sent stop signal to Wiki UI process {target_pid}."
 
 
 class WikiWebApp:
@@ -561,6 +602,15 @@ def _resolve_document_path(cfg: AppConfig, rel_path: str) -> Path:
     if not target.exists() or not target.is_file():
         raise FileNotFoundError(f"Document not found: {rel_path}")
     return target
+
+
+def server_pid_path(cfg: AppConfig | None = None, *, config_path: Path | None = None) -> Path:
+    if config_path is not None:
+        config_dir = config_path.resolve().parent
+        return config_dir / "logs" / "wiki-server.pid"
+    if cfg is None:
+        raise ValueError("cfg or config_path is required to locate the wiki server pid file")
+    return cfg.wiki.root_dir / ".wiki_server.pid"
 
 
 def _utc_now() -> str:
@@ -1864,6 +1914,7 @@ MANUAL_HTML = """<!doctype html>
       <ul>
         <li>Web UI 打不開時，先確認 <code>127.0.0.1:8765</code> 沒被其他程式佔用。</li>
         <li>啟動器錯誤記錄位於 <code>%APPDATA%\\LMIT-2\\logs</code>。</li>
+        <li>若需要從命令列關閉目前的 Web UI server，可執行 <code>lmit-wiki stop --config "%APPDATA%\\LMIT-2\\wiki-only.toml"</code>。</li>
         <li>Ingest 找不到資料時，檢查 <code>Raw Source Paths</code> 是否指向 LMIT-1 的 <code>output/raw</code>。</li>
         <li><code>Save Paths</code> 只儲存路徑與初始化 KB，不會執行 Ingest，也不會呼叫任何 LLM。</li>
         <li>如果按鈕顯示 timeout，通常是 server 未回應、路徑位於慢速/離線磁碟，或另一個長時間操作仍在執行。</li>

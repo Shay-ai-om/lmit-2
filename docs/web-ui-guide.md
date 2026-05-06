@@ -94,4 +94,5 @@ Web UI 不會顯示 stored key 值，只顯示 `API Key Environment Variable` �
 - `Sync Now` 很久：這不一定是壞掉，因為它現在會在背景跑。先看進度訊息是否持續更新。
 - `Sync Now` 背景任務失敗：先看 Web UI 顯示的錯誤內容，再檢查目前 LLM profile、模型名稱與 timeout。
 - Web UI 打不開：先確認 `127.0.0.1:8765` 沒被其他程式占用。
+- 若需要從命令列關閉目前的 Web UI server，可執行 `lmit-wiki stop --config "%APPDATA%\LMIT-2\wiki-only.toml"`。
 - Ingest 找不到資料：確認 `Raw Source Paths` 是否指向 LMIT-1 的 `output/raw`。

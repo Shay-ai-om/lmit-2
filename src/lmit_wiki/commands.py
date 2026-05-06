@@ -12,7 +12,7 @@ from lmit_wiki.promote import promote_checked_candidates
 from lmit_wiki.query import answer_wiki_query
 from lmit_wiki.runtime import load_runtime_settings
 from lmit_wiki.search import search_wiki
-from lmit_wiki.server import serve_wiki_ui
+from lmit_wiki.server import serve_wiki_ui, stop_wiki_ui
 
 
 def add_wiki_subcommands(subparsers: argparse._SubParsersAction) -> None:
@@ -91,6 +91,11 @@ def add_wiki_command_parsers(wiki_sub: argparse._SubParsersAction) -> None:
     serve.add_argument("--host")
     serve.add_argument("--port", type=int)
     serve.set_defaults(func=wiki_serve_command)
+
+    stop = wiki_sub.add_parser("stop", help="stop the wiki web UI server")
+    stop.add_argument("--config", type=Path)
+    stop.add_argument("--pid", type=int)
+    stop.set_defaults(func=wiki_stop_command)
 
 
 def wiki_init_command(args: argparse.Namespace) -> int:
@@ -231,4 +236,11 @@ def wiki_serve_command(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     serve_wiki_ui(cfg, config_path=args.config, host=args.host, port=args.port)
     return 0
+
+
+def wiki_stop_command(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config) if args.config is None else None
+    stopped, message = stop_wiki_ui(cfg, config_path=args.config, pid=args.pid)
+    print(message)
+    return 0 if stopped else 1
 

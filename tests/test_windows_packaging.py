@@ -77,6 +77,7 @@ def test_windows_task_scripts_register_and_remove_scheduled_tasks():
     assert "127.0.0.1:8765" in start_text
     assert "Ensure-LmitWikiConfig" in start_text
     assert "Start-Process" in start_text
+    assert '$serverArguments = "serve --config $(Quote-Argument $ConfigPath) --host 127.0.0.1 --port 8765"' in start_text
     assert "RedirectStandardOutput $stdoutPath" in start_text
     assert "RedirectStandardError $stderrPath" in start_text
     assert "start-console.ps1" in cmd_text
