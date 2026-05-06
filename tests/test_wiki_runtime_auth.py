@@ -8,6 +8,7 @@ from lmit_wiki.builder import init_wiki
 from lmit_wiki.runtime import (
     invoke_text_completion,
     load_runtime_settings,
+    parse_json_document,
     RuntimeSettingsError,
     runtime_settings_public_payload,
     save_runtime_settings,
@@ -398,4 +399,16 @@ def test_wiki_settings_ui_uses_api_key_env_field():
     assert 'data-field="api_key_env"' in INDEX_HTML
     assert 'data-field="api_key"' not in INDEX_HTML
     assert "Stored key:" not in INDEX_HTML
+
+
+def test_parse_json_document_accepts_trailing_text_after_first_object():
+    payload = parse_json_document(
+        '{"source_summary":"ok","topics":[],"entities":[]}\n\nAdditional notes that should be ignored.'
+    )
+
+    assert payload == {
+        "source_summary": "ok",
+        "topics": [],
+        "entities": [],
+    }
 

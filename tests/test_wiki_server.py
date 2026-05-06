@@ -178,7 +178,7 @@ def test_web_ui_sync_runs_as_background_job(tmp_path, monkeypatch):
     started = Event()
     release = Event()
 
-    def fake_sync(cfg_arg, *, limit=None, progress=None):
+    def fake_sync(cfg_arg, *, limit=None, progress=None, should_stop=None):
         assert cfg_arg == cfg
         assert limit == 2
         if progress is not None:
@@ -254,6 +254,97 @@ def test_web_ui_sync_runs_as_background_job(tmp_path, monkeypatch):
     assert completed_payload["job"]["created_pages"] == 1
     assert completed_payload["job"]["updated_pages"] == 1
     assert completed_payload["job"]["pages"][0]["name"] == "Alpha Topic"
+
+
+def test_web_ui_sync_can_stop_and_resume_background_job(tmp_path, monkeypatch):
+    cfg = default_config(tmp_path)
+    app = WikiWebApp(cfg)
+    started = Event()
+    calls = {"count": 0}
+
+    def fake_sync(cfg_arg, *, limit=None, progress=None, should_stop=None):
+        assert cfg_arg == cfg
+        calls["count"] += 1
+        if calls["count"] == 1:
+            if progress is not None:
+                progress(
+                    {
+                        "message": "Syncing source 1 of 2: Alpha",
+                        "total_sources": 2,
+                        "processed_sources": 0,
+                        "created_pages": 0,
+                        "updated_pages": 0,
+                        "current_source_title": "Alpha",
+                        "current_relative_path": "wiki/sources/alpha.md",
+                        "stage": "source",
+                    }
+                )
+            started.set()
+            deadline = time.time() + 2
+            while time.time() < deadline:
+                if should_stop is not None and should_stop():
+                    return AutoSyncResult(
+                        processed_sources=1,
+                        created_pages=0,
+                        updated_pages=0,
+                        pages=(),
+                        status="stopped",
+                    )
+                time.sleep(0.02)
+            raise AssertionError("stop was never requested")
+        return AutoSyncResult(
+            processed_sources=1,
+            created_pages=1,
+            updated_pages=0,
+            pages=(
+                SyncedPage(
+                    name="Beta Topic",
+                    kind="topic",
+                    path=cfg.wiki.topics_dir / "beta-topic.md",
+                    action="created",
+                ),
+            ),
+            status="completed",
+        )
+
+    monkeypatch.setattr("lmit_wiki.server.auto_sync_wiki", fake_sync)
+
+    start_payload = _call_json(app, "POST", "/api/sync", {"limit": 2})
+    first_job_id = start_payload["job"]["job_id"]
+    assert start_payload["started"] is True
+    assert started.wait(1)
+
+    stop_payload = _call_json(app, "POST", "/api/sync/stop")
+    assert stop_payload["stopped"] is True
+    assert stop_payload["job"]["job_id"] == first_job_id
+
+    deadline = time.time() + 2
+    stopped_payload = stop_payload
+    while time.time() < deadline:
+        stopped_payload = _call_json(app, "GET", "/api/sync", query_string=f"job_id={first_job_id}")
+        if stopped_payload["job"]["status"] == "stopped":
+            break
+        time.sleep(0.05)
+
+    assert stopped_payload["job"]["status"] == "stopped"
+    assert stopped_payload["job"]["processed_sources"] == 1
+
+    resume_payload = _call_json(app, "POST", "/api/sync/resume", {"limit": 2})
+    assert resume_payload["started"] is True
+    assert resume_payload["job"]["job_id"] != first_job_id
+
+    second_job_id = resume_payload["job"]["job_id"]
+    deadline = time.time() + 2
+    completed_payload = resume_payload
+    while time.time() < deadline:
+        completed_payload = _call_json(app, "GET", "/api/sync", query_string=f"job_id={second_job_id}")
+        if completed_payload["job"]["status"] == "completed":
+            break
+        time.sleep(0.05)
+
+    assert completed_payload["job"]["status"] == "completed"
+    assert completed_payload["job"]["pages"][0]["name"] == "Beta Topic"
+    assert calls["count"] == 2
 
 
 def test_web_ui_streams_query_answer_chunks(tmp_path, monkeypatch):

@@ -331,41 +331,31 @@ def invoke_json_completion(
 
 def parse_json_document(text: str) -> Any:
     stripped = text.strip()
+    decoder = json.JSONDecoder()
+    if stripped.startswith("{") or stripped.startswith("["):
+        try:
+            payload, _index = decoder.raw_decode(stripped)
+            return payload
+        except json.JSONDecodeError:
+            pass
     try:
         return json.loads(stripped)
     except json.JSONDecodeError:
         pass
 
-    fenced = re.search(r"```(?:json)?\s*(?P<body>\{.*\}|\[.*\])\s*```", stripped, re.DOTALL)
+    fenced = re.search(r"```(?:json)?\s*(?P<body>[\s\S]*?)\s*```", stripped, re.DOTALL)
     if fenced:
-        return json.loads(fenced.group("body"))
+        return parse_json_document(fenced.group("body"))
 
     for opener, closer in (("{", "}"), ("[", "]")):
         start = stripped.find(opener)
         if start < 0:
             continue
-        depth = 0
-        in_string = False
-        escape = False
-        for index in range(start, len(stripped)):
-            char = stripped[index]
-            if in_string:
-                if escape:
-                    escape = False
-                elif char == "\\":
-                    escape = True
-                elif char == '"':
-                    in_string = False
-                continue
-            if char == '"':
-                in_string = True
-                continue
-            if char == opener:
-                depth += 1
-            elif char == closer:
-                depth -= 1
-                if depth == 0:
-                    return json.loads(stripped[start : index + 1])
+        try:
+            payload, _index = decoder.raw_decode(stripped[start:])
+            return payload
+        except json.JSONDecodeError:
+            continue
     raise json.JSONDecodeError("Unable to locate JSON document", stripped, 0)
 
 

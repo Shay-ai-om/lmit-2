@@ -15,7 +15,7 @@ import json
 
 from lmit_wiki.builder import ingest_wiki, init_wiki, lint_wiki
 from lmit_wiki.config import AppConfig, load_config, write_local_config
-from lmit_wiki.auto import auto_sync_wiki
+from lmit_wiki.auto import auto_sync_wiki, clear_sync_stop_request, request_sync_stop
 from lmit_wiki.path_safety import ensure_within_root
 from lmit_wiki.query import answer_wiki_query, stream_wiki_query_answer
 from lmit_wiki.runtime import (
@@ -50,6 +50,7 @@ class SyncJobState:
     updated_pages: int = 0
     pages: list[dict[str, str]] = field(default_factory=list)
     error: str | None = None
+    stop_requested: bool = False
 
     def payload(self) -> dict[str, object]:
         return {
@@ -68,6 +69,7 @@ class SyncJobState:
             "updated_pages": self.updated_pages,
             "pages": self.pages,
             "error": self.error,
+            "stop_requested": self.stop_requested,
         }
 
 
@@ -78,18 +80,37 @@ class SyncJobManager:
         self._latest_job_id: str | None = None
         self._active_job_id: str | None = None
 
-    def start_job(self, cfg: AppConfig, *, limit: int | None = None) -> tuple[dict[str, object], bool]:
+    def start_job(
+        self,
+        cfg: AppConfig,
+        *,
+        limit: int | None = None,
+        resume: bool = False,
+    ) -> tuple[dict[str, object], bool]:
         with self._lock:
             if self._active_job_id is not None:
                 active = self._jobs.get(self._active_job_id)
                 if active is not None and active.status in {"queued", "running"}:
                     return active.payload(), False
-            job = SyncJobState(job_id=uuid4().hex[:12], requested_limit=limit)
+            job = SyncJobState(
+                job_id=uuid4().hex[:12],
+                requested_limit=limit,
+                message="Resuming sync job..." if resume else "Queued.",
+            )
             self._jobs[job.job_id] = job
             self._latest_job_id = job.job_id
             self._active_job_id = job.job_id
+        clear_sync_stop_request(cfg)
         Thread(target=self._run_job, args=(job.job_id, cfg, limit), daemon=True).start()
         return job.payload(), True
+
+    def resume_job(self, cfg: AppConfig, *, limit: int | None = None) -> tuple[dict[str, object], bool]:
+        with self._lock:
+            if limit is None and self._latest_job_id is not None:
+                latest = self._jobs.get(self._latest_job_id)
+                if latest is not None:
+                    limit = latest.requested_limit
+        return self.start_job(cfg, limit=limit, resume=True)
 
     def get_job(self, job_id: str | None = None) -> dict[str, object] | None:
         with self._lock:
@@ -98,6 +119,22 @@ class SyncJobManager:
                 return None
             job = self._jobs.get(target)
             return job.payload() if job is not None else None
+
+    def request_stop(self, cfg: AppConfig, job_id: str | None = None) -> tuple[dict[str, object] | None, bool]:
+        with self._lock:
+            target = job_id or self._active_job_id or self._latest_job_id
+            if target is None:
+                return None, False
+            job = self._jobs.get(target)
+            if job is None:
+                return None, False
+            if job.status not in {"queued", "running"}:
+                return job.payload(), False
+            job.stop_requested = True
+            job.message = "Stop requested. Sync will stop after the current source finishes."
+            payload = job.payload()
+        request_sync_stop(cfg)
+        return payload, True
 
     def _run_job(self, job_id: str, cfg: AppConfig, limit: int | None) -> None:
         self._update_job(
@@ -120,19 +157,31 @@ class SyncJobManager:
             )
 
         try:
-            result = auto_sync_wiki(cfg, limit=limit, progress=report_progress)
+            result = auto_sync_wiki(
+                cfg,
+                limit=limit,
+                progress=report_progress,
+                should_stop=lambda: self._job_should_stop(job_id),
+            )
+            final_status = "stopped" if result.status == "stopped" else "completed"
+            final_message = (
+                f"Sync stopped after processing {result.processed_sources} source(s)."
+                if result.status == "stopped"
+                else (
+                    "Sync finished with no wiki page changes."
+                    if not result.pages
+                    else f"Sync finished. Created {result.created_pages} page(s) and updated {result.updated_pages} page(s)."
+                )
+            )
             self._update_job(
                 job_id,
-                status="completed",
+                status=final_status,
                 finished_at=_utc_now(),
                 processed_sources=result.processed_sources,
                 created_pages=result.created_pages,
                 updated_pages=result.updated_pages,
-                message=(
-                    "Sync finished with no wiki page changes."
-                    if not result.pages
-                    else f"Sync finished. Created {result.created_pages} page(s) and updated {result.updated_pages} page(s)."
-                ),
+                message=final_message,
+                stop_requested=False,
                 pages=[
                     {
                         "name": page.name,
@@ -150,8 +199,10 @@ class SyncJobManager:
                 finished_at=_utc_now(),
                 message="Sync failed.",
                 error=str(exc),
+                stop_requested=False,
             )
         finally:
+            clear_sync_stop_request(cfg)
             with self._lock:
                 if self._active_job_id == job_id:
                     self._active_job_id = None
@@ -160,8 +211,13 @@ class SyncJobManager:
         with self._lock:
             job = self._jobs[job_id]
             for key, value in changes.items():
-                if value is not None or key in {"current_source_title", "current_relative_path", "error"}:
+                if value is not None or key in {"current_source_title", "current_relative_path", "error", "stop_requested"}:
                     setattr(job, key, value)
+
+    def _job_should_stop(self, job_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            return bool(job and job.stop_requested)
 
 
 def serve_wiki_ui(
@@ -348,6 +404,33 @@ class WikiWebApp:
                 raw_limit = payload.get("limit")
                 limit = int(raw_limit) if raw_limit not in (None, "") else None
                 job, started = self._sync_jobs.start_job(self._current_cfg(), limit=limit)
+                return self._json(
+                    start_response,
+                    {
+                        "started": started,
+                        "job": job,
+                    },
+                    status=HTTPStatus.ACCEPTED if started else HTTPStatus.OK,
+                )
+            if method == "POST" and path == "/api/sync/stop":
+                payload = self._read_json(environ)
+                job_id = str(payload.get("job_id", "")).strip() or None
+                job, stopped = self._sync_jobs.request_stop(self._current_cfg(), job_id=job_id)
+                if job is None:
+                    raise ValueError("No sync job is available to stop.")
+                return self._json(
+                    start_response,
+                    {
+                        "stopped": stopped,
+                        "job": job,
+                    },
+                    status=HTTPStatus.OK if stopped else HTTPStatus.CONFLICT,
+                )
+            if method == "POST" and path == "/api/sync/resume":
+                payload = self._read_json(environ)
+                raw_limit = payload.get("limit")
+                limit = int(raw_limit) if raw_limit not in (None, "") else None
+                job, started = self._sync_jobs.resume_job(self._current_cfg(), limit=limit)
                 return self._json(
                     start_response,
                     {
@@ -988,6 +1071,8 @@ INDEX_HTML = """<!doctype html>
           <div class="toolbar">
             <input id="syncLimit" placeholder="Optional source limit">
             <button id="syncButton" onclick="runSync()">Sync Now</button>
+            <button id="syncStopButton" class="secondary" onclick="stopSync()">Stop Sync</button>
+            <button id="syncResumeButton" class="secondary" onclick="resumeSync()">Resume Sync</button>
           </div>
         </div>
         <div id="syncStatus" class="status"></div>
@@ -1426,7 +1511,7 @@ INDEX_HTML = """<!doctype html>
         if (!data.job) {
           currentSyncJobId = null;
           stopSyncPolling();
-          setSyncButtonBusy(false);
+          setSyncActionButtons(null);
           return;
         }
         currentSyncJobId = data.job.job_id || null;
@@ -1461,13 +1546,19 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
-    function setSyncButtonBusy(isBusy) {
-      const button = document.getElementById("syncButton");
-      if (!button) {
+    function setSyncActionButtons(job) {
+      const startButton = document.getElementById("syncButton");
+      const stopButton = document.getElementById("syncStopButton");
+      const resumeButton = document.getElementById("syncResumeButton");
+      if (!startButton || !stopButton || !resumeButton) {
         return;
       }
-      button.disabled = Boolean(isBusy);
-      button.textContent = isBusy ? "Sync Running..." : "Sync Now";
+      const isBusy = isSyncJobActive(job);
+      const canResume = Boolean(job && ["failed", "stopped"].includes(job.status));
+      startButton.disabled = Boolean(isBusy);
+      startButton.textContent = isBusy ? "Sync Running..." : "Sync Now";
+      stopButton.disabled = !isBusy;
+      resumeButton.disabled = !canResume;
     }
 
     async function pollSyncJob() {
@@ -1479,7 +1570,7 @@ INDEX_HTML = """<!doctype html>
       if (!data.job) {
         currentSyncJobId = null;
         stopSyncPolling();
-        setSyncButtonBusy(false);
+        setSyncActionButtons(null);
         return;
       }
       renderSyncJob(data.job);
@@ -1494,7 +1585,7 @@ INDEX_HTML = """<!doctype html>
     function renderSyncJob(job) {
       const root = document.getElementById("syncOutput");
       root.innerHTML = "";
-      setSyncButtonBusy(isSyncJobActive(job));
+      setSyncActionButtons(job);
 
       const summary = document.createElement("div");
       summary.className = "result";
@@ -1536,6 +1627,8 @@ INDEX_HTML = """<!doctype html>
 
       if (job.status === "failed") {
         status("syncStatus", job.error ? `Sync failed: ${job.error}` : "Sync failed.");
+      } else if (job.status === "stopped") {
+        status("syncStatus", job.message || "Sync stopped.");
       } else if (isSyncJobActive(job)) {
         status("syncStatus", job.message || "Sync running...");
       } else {
@@ -1788,6 +1881,53 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
+    async function stopSync() {
+      try {
+        status("syncStatus", "Requesting stop...");
+        const payload = currentSyncJobId ? { job_id: currentSyncJobId } : {};
+        const data = await requestJson("/api/sync/stop", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        }, 10);
+        if (!data.job) {
+          status("syncStatus", "No sync job is available to stop.");
+          return;
+        }
+        currentSyncJobId = data.job.job_id || currentSyncJobId;
+        renderSyncJob(data.job);
+        if (isSyncJobActive(data.job)) {
+          queueSyncPoll(1000);
+        }
+      } catch (error) {
+        status("syncStatus", `Stop request failed: ${error.message}`);
+      }
+    }
+
+    async function resumeSync() {
+      try {
+        status("syncStatus", "Resuming sync...");
+        const raw = document.getElementById("syncLimit").value.trim();
+        const payload = raw ? { limit: Number(raw) } : {};
+        const data = await requestJson("/api/sync/resume", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        }, 15);
+        if (!data.job) {
+          status("syncStatus", "Resume did not return a job.");
+          return;
+        }
+        currentSyncJobId = data.job.job_id || null;
+        renderSyncJob(data.job);
+        if (isSyncJobActive(data.job)) {
+          queueSyncPoll(1000);
+        }
+      } catch (error) {
+        status("syncStatus", `Resume failed to start: ${error.message}`);
+      }
+    }
+
     function escapeHtml(value) {
       return String(value)
         .replaceAll("&", "&amp;")
@@ -1871,6 +2011,8 @@ MANUAL_HTML = """<!doctype html>
         <li><code>Ask The Wiki</code>：根據目前 wiki 回答問題；<code>Ask And Save</code> 會把結果存入 <code>wiki/queries</code>。</li>
         <li><code>Ask The Wiki</code> 現在會串流顯示答案，只要模型已開始輸出 token，畫面就會持續更新。</li>
         <li><code>Sync Now</code>：背景執行 LLM auto sync，Web UI 會顯示目前 source、已處理數量與完成結果。</li>
+        <li><code>Stop Sync</code>：要求目前背景 sync 在當前 source 完成後停止，不會回滾已完成的 page update。</li>
+        <li><code>Resume Sync</code>：從下一筆未完成 source 繼續，不會重跑已成功完成的 source。</li>
       </ol>
     </section>
     <section>
@@ -1920,6 +2062,7 @@ MANUAL_HTML = """<!doctype html>
         <li>如果按鈕顯示 timeout，通常是 server 未回應、路徑位於慢速/離線磁碟，或另一個長時間操作仍在執行。</li>
         <li>如果只有 <code>Ask The Wiki</code> 沒有任何串流輸出，先確認模型已載入、provider 支援串流，或提高 <code>Timeout Seconds</code>。</li>
         <li>如果 <code>Sync Now</code> 顯示背景任務失敗，先看進度訊息，再檢查目前 LLM profile 的 <code>Timeout Seconds</code>。</li>
+        <li>如果背景 sync 因模型回傳雜訊而失敗，<code>Resume Sync</code> 會從下一筆未完成 source 接著跑；已成功完成的 source 不會重做。</li>
       </ul>
     </section>
   </main>

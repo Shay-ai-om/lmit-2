@@ -57,6 +57,8 @@ Use the web UI for day-to-day actions:
 
 - `Ingest`: imports current LMIT-1 raw Markdown
 - `Sync`: runs the LLM-driven topic/entity update flow
+- `Stop Sync`: requests that the current sync stop after the active source finishes
+- `Resume Sync`: continues from the next unprocessed source instead of restarting from the beginning
 - `Lint`: validates the knowledge-base structure
 
 See [web-ui-guide.md](web-ui-guide.md) for the current Web UI operation guide.
@@ -138,6 +140,8 @@ lmit-wiki.exe init --config "$env:APPDATA\LMIT-2\wiki-only.toml"
 lmit-wiki.exe ingest --config "$env:APPDATA\LMIT-2\wiki-only.toml"
 lmit-wiki.exe search --config "$env:APPDATA\LMIT-2\wiki-only.toml" "openclaw"
 lmit-wiki.exe lint --config "$env:APPDATA\LMIT-2\wiki-only.toml"
+lmit-wiki.exe sync-stop --config "$env:APPDATA\LMIT-2\wiki-only.toml"
+lmit-wiki.exe sync-resume --config "$env:APPDATA\LMIT-2\wiki-only.toml"
 lmit-wiki.exe stop --config "$env:APPDATA\LMIT-2\wiki-only.toml"
 ```
 

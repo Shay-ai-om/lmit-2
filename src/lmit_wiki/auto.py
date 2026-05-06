@@ -29,6 +29,7 @@ class AutoSyncResult:
     created_pages: int
     updated_pages: int
     pages: tuple[SyncedPage, ...]
+    status: str = "completed"
 
 
 def auto_sync_wiki(
@@ -36,6 +37,7 @@ def auto_sync_wiki(
     *,
     limit: int | None = None,
     progress: Callable[[dict[str, object]], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> AutoSyncResult:
     init_wiki(cfg)
     manifest_path = cfg.wiki.root_dir / "manifest.json"
@@ -96,6 +98,7 @@ def auto_sync_wiki(
                 pages.append(synced)
                 catalog[kind].append(item["name"])
         state["processed_sources"][str(record["relative_path"])] = str(record.get("content_hash", ""))
+        _save_state(cfg, state)
         created_so_far = sum(1 for page in pages if page.action == "created")
         updated_so_far = sum(1 for page in pages if page.action == "updated")
         _report_progress(
@@ -110,8 +113,16 @@ def auto_sync_wiki(
             current_relative_path=str(record.get("relative_path") or ""),
             message=f"Finished source {index} of {total_sources}: {record.get('title', 'Untitled')}",
         )
+        if _stop_requested(cfg, should_stop):
+            return _stopped_result(
+                cfg,
+                progress=progress,
+                processed_sources=index,
+                total_sources=total_sources,
+                pages=pages,
+            )
 
-    _save_state(cfg, state)
+    clear_sync_stop_request(cfg)
     if pages:
         append_log(
             cfg,
@@ -139,7 +150,23 @@ def auto_sync_wiki(
         created_pages=created,
         updated_pages=updated,
         pages=tuple(pages),
+        status="completed",
     )
+
+
+def request_sync_stop(cfg: AppConfig) -> str:
+    marker = sync_stop_request_path(cfg)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(datetime.now(timezone.utc).isoformat(), encoding="utf-8")
+    return "Stop requested. If a sync is currently running, it will stop after the current source finishes."
+
+
+def clear_sync_stop_request(cfg: AppConfig) -> None:
+    sync_stop_request_path(cfg).unlink(missing_ok=True)
+
+
+def sync_stop_request_path(cfg: AppConfig) -> Path:
+    return cfg.wiki_runtime.state_path.parent / ".wiki_sync_stop"
 
 
 def _extract_source_updates(
@@ -384,6 +411,45 @@ def _save_state(cfg: AppConfig, state: dict[str, object]) -> None:
         cfg.wiki_runtime.state_path,
         cfg.wiki.root_dir,
         json.dumps(state, ensure_ascii=False, indent=2),
+    )
+
+
+def _stop_requested(cfg: AppConfig, should_stop: Callable[[], bool] | None) -> bool:
+    if should_stop is not None and should_stop():
+        return True
+    return sync_stop_request_path(cfg).exists()
+
+
+def _stopped_result(
+    cfg: AppConfig,
+    *,
+    progress: Callable[[dict[str, object]], None] | None,
+    processed_sources: int,
+    total_sources: int,
+    pages: list[SyncedPage],
+) -> AutoSyncResult:
+    clear_sync_stop_request(cfg)
+    created = sum(1 for page in pages if page.action == "created")
+    updated = sum(1 for page in pages if page.action == "updated")
+    append_log(
+        cfg,
+        f"LLM auto sync stopped after processing {processed_sources} source(s)",
+    )
+    _report_progress(
+        progress,
+        stage="stopped",
+        total_sources=total_sources,
+        processed_sources=processed_sources,
+        created_pages=created,
+        updated_pages=updated,
+        message=f"Sync stopped after processing {processed_sources} source(s).",
+    )
+    return AutoSyncResult(
+        processed_sources=processed_sources,
+        created_pages=created,
+        updated_pages=updated,
+        pages=tuple(pages),
+        status="stopped",
     )
 
 

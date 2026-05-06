@@ -5,7 +5,7 @@ from pathlib import Path
 
 from lmit_wiki.config import load_config
 from lmit_wiki.builder import ingest_wiki, init_wiki, lint_wiki
-from lmit_wiki.auto import auto_sync_wiki
+from lmit_wiki.auto import auto_sync_wiki, clear_sync_stop_request, request_sync_stop
 from lmit_wiki.candidates import generate_candidates
 from lmit_wiki.organize import organize_promoted_pages
 from lmit_wiki.promote import promote_checked_candidates
@@ -85,6 +85,21 @@ def add_wiki_command_parsers(wiki_sub: argparse._SubParsersAction) -> None:
     sync.add_argument("--config", type=Path)
     sync.add_argument("--limit", type=int)
     sync.set_defaults(func=wiki_sync_command)
+
+    sync_stop = wiki_sub.add_parser(
+        "sync-stop",
+        help="request that the current sync stop after the active source finishes",
+    )
+    sync_stop.add_argument("--config", type=Path)
+    sync_stop.set_defaults(func=wiki_sync_stop_command)
+
+    sync_resume = wiki_sub.add_parser(
+        "sync-resume",
+        help="resume sync from the next unprocessed source",
+    )
+    sync_resume.add_argument("--config", type=Path)
+    sync_resume.add_argument("--limit", type=int)
+    sync_resume.set_defaults(func=wiki_sync_resume_command)
 
     serve = wiki_sub.add_parser("serve", help="run the wiki web UI")
     serve.add_argument("--config", type=Path)
@@ -223,10 +238,31 @@ def wiki_query_command(args: argparse.Namespace) -> int:
 
 def wiki_sync_command(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
+    clear_sync_stop_request(cfg)
     result = auto_sync_wiki(cfg, limit=args.limit)
     print(f"Processed sources: {result.processed_sources}")
     print(f"Created pages: {result.created_pages}")
     print(f"Updated pages: {result.updated_pages}")
+    print(f"Status: {result.status}")
+    for page in result.pages:
+        print(f"- {page.action}: {page.kind} {page.path}")
+    return 0
+
+
+def wiki_sync_stop_command(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    print(request_sync_stop(cfg))
+    return 0
+
+
+def wiki_sync_resume_command(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    clear_sync_stop_request(cfg)
+    result = auto_sync_wiki(cfg, limit=args.limit)
+    print(f"Processed sources: {result.processed_sources}")
+    print(f"Created pages: {result.created_pages}")
+    print(f"Updated pages: {result.updated_pages}")
+    print(f"Status: {result.status}")
     for page in result.pages:
         print(f"- {page.action}: {page.kind} {page.path}")
     return 0

@@ -19,6 +19,8 @@
 5. `Ask The Wiki`：根據目前 wiki 回答問題；`Ask And Save` 會把結果存入 `wiki/queries`。
 6. `Ask The Wiki` 現在會串流顯示答案，只要模型開始輸出 token，畫面就會持續更新。
 7. `Sync Now`：背景執行 LLM auto sync，更新 topic/entity 頁面，並在 Web UI 顯示進度。
+8. `Stop Sync`：要求目前背景 sync 在當前 source 完成後停止，不會回滾已經完成的 page update。
+9. `Resume Sync`：從下一筆未完成 source 繼續，不會重跑已成功完成的 source。
 
 ## LLM Settings
 
@@ -26,7 +28,7 @@
 - `Add LM Studio REST`：建立 LM Studio 原生 REST profile，預設 `Base URL` 為 `http://localhost:1234/api/v1`。
 - `Add LiteLLM`：建立本機 LiteLLM proxy profile，預設 `Base URL` 為 `http://localhost:4000`。
 - `Add OpenAI` / `Add Gemini`：建立雲端 API profile。
-- `Fetch Models` 目前支援 OpenAI-compatible 與 LM Studio REST profile。
+- `Fetch Models` 目前支援 OpenAI-compatible、LiteLLM 與 LM Studio REST profile。
 - `Model` 欄位要填 API 真正回傳的 model id 或 model key。
 - API key 只保存「環境變數名稱」，不保存密鑰值本身。
 - 本機 LLM profile 預設 `Timeout Seconds` 為 `300`；慢模型或長上下文可再往上調。
@@ -77,6 +79,8 @@ Web UI 不會顯示 stored key 值，只顯示 `API Key Environment Variable` �
 ## Auto Sync 與排程
 
 - `Sync Now` 會在背景工作執行，不會把瀏覽器卡在單一長請求上。
+- `Stop Sync` 會在目前 source 完成後乾淨停下，不會強制中斷正在跑的那次 LLM 呼叫。
+- `Resume Sync` 會依照已儲存的 `processed_sources` state，從下一筆未完成 source 接著跑。
 - Web UI 會顯示：
   - 目前任務狀態
   - 已處理 source 數量
@@ -84,6 +88,7 @@ Web UI 不會顯示 stored key 值，只顯示 `API Key Environment Variable` �
   - created / updated page 數量
   - 完成後的 page 清單
 - 如果有一個 sync job 已在執行，再按一次 `Sync Now` 不會重複開第二個任務，而是回到既有進度畫面。
+- 如果模型先回傳完整 JSON，後面又多補說明文字，最新版會盡量只擷取第一個完整 JSON 文件，降低 `Extra data` 類型失敗。
 - 第一次安裝通常不建議立刻建立 Windows scheduled ingest / sync / lint tasks，因為路徑、ingest 結果與 LLM profile 往往還沒驗證完。
 
 ## 疑難排解
@@ -93,6 +98,7 @@ Web UI 不會顯示 stored key 值，只顯示 `API Key Environment Variable` �
 - `Ask The Wiki` 沒有任何串流輸出：先確認模型已載入、provider 支援串流，或提高目前 profile 的 `Timeout Seconds`。
 - `Sync Now` 很久：這不一定是壞掉，因為它現在會在背景跑。先看進度訊息是否持續更新。
 - `Sync Now` 背景任務失敗：先看 Web UI 顯示的錯誤內容，再檢查目前 LLM profile、模型名稱與 timeout。
+- `Sync Now` 若中途失敗，可用 `Resume Sync` 從下一筆未完成 source 繼續，不必整批重來。
 - Web UI 打不開：先確認 `127.0.0.1:8765` 沒被其他程式占用。
 - 若需要從命令列關閉目前的 Web UI server，可執行 `lmit-wiki stop --config "%APPDATA%\LMIT-2\wiki-only.toml"`。
 - Ingest 找不到資料：確認 `Raw Source Paths` 是否指向 LMIT-1 的 `output/raw`。
