@@ -234,6 +234,11 @@ def runtime_settings_public_payload(settings: WikiRuntimeSettings) -> dict[str, 
     }
 
 
+def has_enabled_llm_profiles(cfg: AppConfig) -> bool:
+    settings = load_runtime_settings(cfg)
+    return bool(settings.ordered_profiles())
+
+
 def merge_runtime_settings_payload(
     existing: WikiRuntimeSettings,
     incoming: dict[str, Any],

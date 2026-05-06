@@ -25,5 +25,7 @@ class IngestResult:
     copied_raw_count: int
     source_note_count: int
     index_path: Path
+    source_catalog_path: Path
     log_path: Path
+    ingest_mode: str = "standard"
 

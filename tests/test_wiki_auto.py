@@ -110,3 +110,31 @@ def test_auto_sync_can_stop_after_current_source_and_resume_remaining(tmp_path, 
     assert resumed.status == "completed"
     assert resumed.processed_sources == 1
     assert seen_resume == ["Beta"]
+
+
+def test_auto_sync_records_recent_sync_changes_on_homepage(tmp_path, monkeypatch):
+    cfg = default_config(tmp_path)
+    raw_dir = cfg.wiki_ingest.source_dirs[0]
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / "alpha.md").write_text("# Alpha\n\none", encoding="utf-8")
+    ingest_wiki(cfg, ingest_mode="fallback")
+
+    def fake_extract(cfg_arg, record, catalog):
+        return {
+            "topics": [
+                {
+                    "name": "Alpha Topic",
+                    "summary": "sum",
+                    "key_points": [],
+                    "open_questions": [],
+                }
+            ],
+            "entities": [],
+        }
+
+    monkeypatch.setattr("lmit_wiki.auto._extract_source_updates", fake_extract)
+    auto_sync_wiki(cfg)
+
+    homepage = cfg.wiki.index_path.read_text(encoding="utf-8")
+    assert "Recent Sync Changes" in homepage
+    assert "Alpha Topic" in homepage

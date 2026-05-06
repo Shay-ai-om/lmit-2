@@ -12,6 +12,7 @@ from lmit_wiki.path_safety import ensure_within_root, safe_write_text
 from lmit_wiki.builder import append_log, init_wiki, refresh_index
 from lmit_wiki.policy import llm_policy_for_sources
 from lmit_wiki.runtime import invoke_json_completion
+from lmit_wiki.state import load_wiki_state, record_recent_sync, save_wiki_state
 from lmit_wiki.text import portable_markdown_filename, strip_frontmatter
 
 
@@ -123,6 +124,12 @@ def auto_sync_wiki(
             )
 
     clear_sync_stop_request(cfg)
+    _record_sync_homepage_state(
+        cfg,
+        status="completed",
+        processed_sources=len(pending),
+        pages=pages,
+    )
     if pages:
         append_log(
             cfg,
@@ -398,20 +405,11 @@ def _titles_in_dir(root: Path) -> list[str]:
 
 
 def _load_state(cfg: AppConfig) -> dict[str, object]:
-    if not cfg.wiki_runtime.state_path.exists():
-        return {
-            "version": 1,
-            "processed_sources": {},
-        }
-    return json.loads(cfg.wiki_runtime.state_path.read_text(encoding="utf-8"))
+    return load_wiki_state(cfg)
 
 
 def _save_state(cfg: AppConfig, state: dict[str, object]) -> None:
-    safe_write_text(
-        cfg.wiki_runtime.state_path,
-        cfg.wiki.root_dir,
-        json.dumps(state, ensure_ascii=False, indent=2),
-    )
+    save_wiki_state(cfg, state)
 
 
 def _stop_requested(cfg: AppConfig, should_stop: Callable[[], bool] | None) -> bool:
@@ -431,6 +429,12 @@ def _stopped_result(
     clear_sync_stop_request(cfg)
     created = sum(1 for page in pages if page.action == "created")
     updated = sum(1 for page in pages if page.action == "updated")
+    _record_sync_homepage_state(
+        cfg,
+        status="stopped",
+        processed_sources=processed_sources,
+        pages=pages,
+    )
     append_log(
         cfg,
         f"LLM auto sync stopped after processing {processed_sources} source(s)",
@@ -463,4 +467,31 @@ def _report_progress(
 ) -> None:
     if progress is not None:
         progress(dict(payload))
+
+
+def _record_sync_homepage_state(
+    cfg: AppConfig,
+    *,
+    status: str,
+    processed_sources: int,
+    pages: list[SyncedPage],
+) -> None:
+    created = sum(1 for page in pages if page.action == "created")
+    updated = sum(1 for page in pages if page.action == "updated")
+    record_recent_sync(
+        cfg,
+        status=status,
+        processed_sources=processed_sources,
+        created_pages=created,
+        updated_pages=updated,
+        pages=[
+            {
+                "name": page.name,
+                "kind": page.kind,
+                "path": page.path.relative_to(cfg.wiki.root_dir).as_posix(),
+                "action": page.action,
+            }
+            for page in pages
+        ],
+    )
 

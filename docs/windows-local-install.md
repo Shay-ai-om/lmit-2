@@ -55,11 +55,19 @@ Start Menu shortcuts:
 
 Use the web UI for day-to-day actions:
 
-- `Ingest`: imports current LMIT-1 raw Markdown
+- `Ingest`: imports current LMIT-1 raw Markdown, writes a compact homepage, and updates `wiki/system/sources.md`
+- If no LLM profile is enabled yet, `Ingest` warns first and lets the user choose between configuring an LLM or continuing with deterministic fallback ingest
 - `Sync`: runs the LLM-driven topic/entity update flow
 - `Stop Sync`: requests that the current sync stop after the active source finishes
 - `Resume Sync`: continues from the next unprocessed source instead of restarting from the beginning
 - `Lint`: validates the knowledge-base structure
+
+The compact homepage now preserves whether the wiki is still in `pre-curation`
+mode after fallback ingest, and it surfaces recent sync/query activity instead
+of reverting to a full source dump.
+
+The build also auto-maintains core hub pages under `wiki/hubs/`, including
+`knowledge-map.md`, `recent-work.md`, and `open-questions.md`.
 
 See [web-ui-guide.md](web-ui-guide.md) for the current Web UI operation guide.
 
