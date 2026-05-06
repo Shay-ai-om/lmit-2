@@ -1637,7 +1637,7 @@ INDEX_HTML = """<!doctype html>
           break;
         }
         buffer += decoder.decode(value, { stream: true });
-        let newlineIndex = buffer.indexOf("\n");
+        let newlineIndex = buffer.indexOf("\\n");
         while (newlineIndex >= 0) {
           const line = buffer.slice(0, newlineIndex).trim();
           buffer = buffer.slice(newlineIndex + 1);
@@ -1657,7 +1657,7 @@ INDEX_HTML = """<!doctype html>
               status("queryStatus", event.error || "Query failed.");
             }
           }
-          newlineIndex = buffer.indexOf("\n");
+          newlineIndex = buffer.indexOf("\\n");
         }
       }
       if (!sawDone && streamedText) {

@@ -137,6 +137,12 @@ def test_web_ui_links_manual_and_exposes_path_controls(tmp_path):
     assert "LiteLLM" in manual
 
 
+def test_web_ui_script_keeps_newline_escape_sequences():
+    assert 'buffer.indexOf("\\n")' in INDEX_HTML
+    assert 'split(/\\r?\\n|;/)' in INDEX_HTML
+    assert 'buffer.indexOf("' + "\n" + '")' not in INDEX_HTML
+
+
 def test_document_route_serves_wiki_markdown_and_blocks_missing_paths(tmp_path):
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
