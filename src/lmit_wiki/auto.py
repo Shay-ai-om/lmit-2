@@ -15,6 +15,27 @@ from lmit_wiki.runtime import invoke_json_completion
 from lmit_wiki.text import portable_markdown_filename, strip_frontmatter
 
 
+MAX_TOPIC_UPDATES_PER_SOURCE = 2
+MAX_ENTITY_UPDATES_PER_SOURCE = 3
+GENERIC_PAGE_NAMES = {
+    "article",
+    "document",
+    "general",
+    "misc",
+    "notes",
+    "page",
+    "post",
+    "source",
+    "summary",
+    "untitled",
+    "update",
+    "來源",
+    "文章",
+    "筆記",
+    "摘要",
+}
+
+
 @dataclass(frozen=True)
 class SyncedPage:
     name: str
@@ -201,6 +222,8 @@ def _extract_source_updates(
                     "Given one source, decide which durable topic and entity pages should be created or updated. "
                     "Do not ask for human review. Prefer reusing existing page titles when they already fit. "
                     "Choose only durable concepts, people, organizations, products, or projects worth revisiting. "
+                    "Avoid generic pages like Notes, Article, Summary, Source, or Misc. "
+                    "Return at most 2 topics and at most 3 entities; return an empty list when no durable page is justified. "
                     "Return JSON only with keys source_summary, topics, entities. "
                     "Each topic/entity item must contain name, summary, key_points, open_questions."
                 ),
@@ -232,7 +255,86 @@ def _extract_source_updates(
     )
     payload.setdefault("topics", [])
     payload.setdefault("entities", [])
-    return payload
+    return _curate_extracted_updates(payload, catalog)
+
+
+def _curate_extracted_updates(
+    payload: dict[str, object],
+    catalog: dict[str, list[str]],
+) -> dict[str, object]:
+    curated = dict(payload)
+    curated["topics"] = _curated_items(
+        payload.get("topics", []),
+        existing_titles=catalog["topic"],
+        max_items=MAX_TOPIC_UPDATES_PER_SOURCE,
+    )
+    curated["entities"] = _curated_items(
+        payload.get("entities", []),
+        existing_titles=catalog["entity"],
+        max_items=MAX_ENTITY_UPDATES_PER_SOURCE,
+    )
+    return curated
+
+
+def _curated_items(
+    raw_items: object,
+    *,
+    existing_titles: list[str],
+    max_items: int,
+) -> list[dict[str, object]]:
+    if not isinstance(raw_items, list):
+        return []
+    existing_by_key = {_title_key(title): title for title in existing_titles}
+    seen: set[str] = set()
+    curated: list[dict[str, object]] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            continue
+        title = _clean_page_name(raw_item.get("name"))
+        if not _is_indexable_page_name(title):
+            continue
+        summary = str(raw_item.get("summary") or "").strip()
+        key_points = _clean_string_list(raw_item.get("key_points", []))
+        if not summary and not key_points:
+            continue
+        key = _title_key(title)
+        if key in seen:
+            continue
+        item = dict(raw_item)
+        item["name"] = existing_by_key.get(key, title)
+        item["summary"] = summary
+        item["key_points"] = key_points
+        item["open_questions"] = _clean_string_list(raw_item.get("open_questions", []))
+        curated.append(item)
+        seen.add(key)
+        if len(curated) >= max_items:
+            break
+    return curated
+
+
+def _clean_page_name(value: object) -> str:
+    return " ".join(str(value or "").strip().split())
+
+
+def _clean_string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _title_key(value: str) -> str:
+    return value.casefold().strip()
+
+
+def _is_indexable_page_name(title: str) -> bool:
+    key = _title_key(title)
+    if len(title) < 2 or len(title) > 90:
+        return False
+    if key in GENERIC_PAGE_NAMES:
+        return False
+    if title.startswith(("http://", "https://")):
+        return False
+    return any(ch.isalnum() for ch in title)
 
 
 def _upsert_page(

@@ -90,7 +90,7 @@ def test_short_internal_paths_preserve_search_and_query_traceability(tmp_path, m
 
     assert answer.saved_path is not None
     assert len(answer.saved_path.name.encode("utf-8")) <= MAX_PORTABLE_FILENAME_CHARS
-    assert seen_policies == ["local_only"]
+    assert seen_policies == ["external_llm_allowed"]
 
 
 def test_portable_markdown_filename_bounds_long_titles():

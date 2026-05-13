@@ -65,11 +65,10 @@ OPENROUTER_API_KEY=...
 
 For a LAN model server, configure an OpenAI-compatible profile with a private
 base URL such as `http://192.168.1.10:1234/v1`, or use Ollama at
-`http://192.168.1.10:11434/api`. The privacy gate treats localhost, private IPs,
-and `.local` hostnames as local providers.
+`http://192.168.1.10:11434/api`.
 
-Sources marked `local_private` or `restricted_or_login` are allowed only with
-local providers. Public-only sources may use external cloud providers.
+Source visibility is kept as metadata, not as a provider gate. LMIT-2 uses the
+enabled profiles and fallback order configured in LLM Settings.
 
 ## Scheduled Commands
 

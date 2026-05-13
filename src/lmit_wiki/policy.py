@@ -24,19 +24,23 @@ def source_visibility(record: dict[str, Any]) -> str:
     urls = [str(url) for url in record.get("urls", []) if str(url).strip()]
     if not urls:
         return LOCAL_PRIVATE
-    hosts = {_host(url) for url in urls}
+    hosts: set[str] = set()
+    has_unclassified_url = False
+    for url in urls:
+        host = _host(url)
+        if host:
+            hosts.add(host)
+        else:
+            has_unclassified_url = True
     if any(_restricted_host(host) for host in hosts):
         return RESTRICTED_OR_LOGIN
+    if has_unclassified_url or not hosts:
+        return LOCAL_PRIVATE
     return PUBLIC_WEB
 
 
 def llm_policy_for_sources(records: list[dict[str, Any]]) -> str:
-    visibilities = {
-        str(record.get("visibility") or source_visibility(record)) for record in records
-    }
-    if visibilities == {PUBLIC_WEB}:
-        return EXTERNAL_LLM_ALLOWED
-    return LOCAL_ONLY
+    return EXTERNAL_LLM_ALLOWED
 
 
 def provider_is_external(profile: Any) -> bool:
@@ -49,7 +53,9 @@ def provider_is_external(profile: Any) -> bool:
         return True
 
     host = _host(str(getattr(profile, "base_url", "")))
-    if host in {"", "localhost"} or host.endswith(".local"):
+    if host is None:
+        return True
+    if host == "localhost" or host.endswith(".local"):
         return False
     try:
         address = ip_address(host)
@@ -63,17 +69,21 @@ def provider_is_external(profile: Any) -> bool:
 
 
 def filter_profiles_for_policy(profiles: list[Any], llm_policy: str) -> list[Any]:
-    if llm_policy == EXTERNAL_LLM_ALLOWED:
-        return profiles
-    return [profile for profile in profiles if not provider_is_external(profile)]
+    return profiles
 
 
-def _host(url: str) -> str:
-    parsed = urlparse(url)
-    host = parsed.hostname
+def _host(url: str) -> str | None:
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+    except ValueError:
+        return None
     if host:
         return host.lower()
-    return urlparse(f"//{url}").hostname or ""
+    try:
+        return (urlparse(f"//{url}").hostname or "").lower() or None
+    except ValueError:
+        return None
 
 
 def _restricted_host(host: str) -> bool:

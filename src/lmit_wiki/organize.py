@@ -141,12 +141,8 @@ def render_organized_page(cfg: AppConfig, candidate: dict, kind: str) -> str:
         )
 
     lines.extend(["", "## Review Notes", ""])
-    if llm_policy == "external_llm_allowed":
-        lines.append("- This page can be sent to an external LLM under the current policy.")
-    elif llm_policy == "mixed_review_required":
-        lines.append("- Review source visibility before sending any synthesis task to an external LLM.")
-    else:
-        lines.append("- Keep synthesis local unless the source policy changes.")
+    lines.append("- LLM provider selection follows the profiles configured in LLM Settings.")
+    lines.append("- Review source visibility when deciding how much trust to place in this draft.")
     lines.append("- Replace this organized draft with a human-reviewed synthesis when ready.")
 
     lines.extend(["", "## Open Questions", "", "- Which claims should be promoted to durable conclusions?"])
@@ -165,7 +161,7 @@ def _summary(
     return (
         f"This {label} page organizes the current source evidence for **{name}**. "
         f"It is based on {len(sources)} source(s), with visibility coverage of {visibility or 'none'}. "
-        f"The current LLM policy is `{llm_policy}`, so the page should be treated as a reviewable draft."
+        f"The page should be treated as a reviewable draft."
     )
 
 

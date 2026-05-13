@@ -2,8 +2,6 @@
 
 import json
 
-import pytest
-
 from lmit_wiki.config import default_config
 from lmit_wiki.auto import auto_sync_wiki
 from lmit_wiki.builder import ingest_wiki, init_wiki
@@ -13,7 +11,7 @@ from lmit_wiki.policy import (
     provider_is_external,
     source_visibility,
 )
-from lmit_wiki.runtime import LLMInvocationError, LLMProfile, invoke_text_completion
+from lmit_wiki.runtime import LLMProfile, invoke_text_completion
 from lmit_wiki.query import answer_wiki_query
 
 
@@ -25,13 +23,17 @@ def test_source_visibility_marks_login_and_local_sources_private():
     assert source_visibility({"urls": []}) == "local_private"
 
 
-def test_llm_policy_requires_local_for_mixed_or_private_sources():
+def test_source_visibility_treats_malformed_urls_as_local_private():
+    assert source_visibility({"urls": ["https://[not-ipv6/path"]}) == "local_private"
+
+
+def test_llm_policy_does_not_block_configured_providers():
     assert llm_policy_for_sources([{"visibility": "public_web"}]) == "external_llm_allowed"
     assert (
         llm_policy_for_sources(
             [{"visibility": "public_web"}, {"visibility": "local_private"}]
         )
-        == "local_only"
+        == "external_llm_allowed"
     )
 
 
@@ -61,7 +63,7 @@ def test_lmstudio_rest_endpoint_is_not_external():
     assert provider_is_external(profile) is False
 
 
-def test_local_only_policy_filters_external_profiles():
+def test_policy_filter_keeps_all_configured_profiles():
     external = LLMProfile(
         profile_id="openai",
         provider="openai_compatible",
@@ -79,7 +81,7 @@ def test_local_only_policy_filters_external_profiles():
         api_key_env="",
     )
 
-    assert filter_profiles_for_policy([external, local], "local_only") == [local]
+    assert filter_profiles_for_policy([external, local], "local_only") == [external, local]
 
 
 def test_ingest_manifest_records_source_visibility_and_llm_policy(tmp_path):
@@ -96,10 +98,28 @@ def test_ingest_manifest_records_source_visibility_and_llm_policy(tmp_path):
     manifest = json.loads((cfg.wiki.root_dir / "manifest.json").read_text(encoding="utf-8"))
     record = manifest["sources"][0]
     assert record["visibility"] == "restricted_or_login"
-    assert record["llm_policy"] == "local_only"
+    assert record["llm_policy"] == "external_llm_allowed"
 
 
-def test_runtime_blocks_external_profiles_for_local_only_policy(tmp_path):
+def test_ingest_manifest_handles_malformed_url_without_ipv6_error(tmp_path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "malformed.md").write_text(
+        "Broken URL copied from a page: https://[not-ipv6/path",
+        encoding="utf-8",
+    )
+    cfg = default_config(tmp_path)
+
+    ingest_wiki(cfg, source_dirs=[source_dir])
+
+    manifest = json.loads((cfg.wiki.root_dir / "manifest.json").read_text(encoding="utf-8"))
+    record = manifest["sources"][0]
+    assert record["urls"] == ["https://[not-ipv6/path"]
+    assert record["visibility"] == "local_private"
+    assert record["llm_policy"] == "external_llm_allowed"
+
+
+def test_runtime_allows_external_profiles_for_local_only_policy(tmp_path, monkeypatch):
     cfg = default_config(tmp_path)
     init_wiki(cfg)
     cfg.wiki_runtime.settings_path.write_text(
@@ -123,14 +143,24 @@ def test_runtime_blocks_external_profiles_for_local_only_policy(tmp_path):
         ),
         encoding="utf-8",
     )
+    captured: dict[str, object] = {}
 
-    with pytest.raises(LLMInvocationError, match="No LLM profiles are allowed"):
-        invoke_text_completion(
-            cfg,
-            [{"role": "user", "content": "hello"}],
-            purpose="policy test",
-            llm_policy="local_only",
-        )
+    def fake_post_json(url, headers, payload, *, timeout_seconds):
+        captured["url"] = url
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("lmit_wiki.runtime._post_json", fake_post_json)
+
+    completion = invoke_text_completion(
+        cfg,
+        [{"role": "user", "content": "hello"}],
+        purpose="policy test",
+        llm_policy="local_only",
+    )
+
+    assert completion.content == "ok"
+    assert captured["url"] == "https://api.openai.com/v1/chat/completions"
 
 
 def test_auto_sync_passes_source_policy_to_llm(tmp_path, monkeypatch):
@@ -152,7 +182,7 @@ def test_auto_sync_passes_source_policy_to_llm(tmp_path, monkeypatch):
 
     auto_sync_wiki(cfg, limit=1)
 
-    assert seen_policies == ["local_only"]
+    assert seen_policies == ["external_llm_allowed"]
 
 
 def test_query_passes_combined_search_policy_to_llm(tmp_path, monkeypatch):
@@ -179,5 +209,5 @@ def test_query_passes_combined_search_policy_to_llm(tmp_path, monkeypatch):
     answer = answer_wiki_query(cfg, "facebook", save=False)
 
     assert answer.title == "Facebook source"
-    assert seen_policies == ["local_only"]
+    assert seen_policies == ["external_llm_allowed"]
 

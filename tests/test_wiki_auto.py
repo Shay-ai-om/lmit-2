@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from lmit_wiki.auto import auto_sync_wiki
+from lmit_wiki.auto import auto_sync_wiki, _curate_extracted_updates
 from lmit_wiki.builder import ingest_wiki
 from lmit_wiki.config import default_config
 
@@ -110,3 +110,44 @@ def test_auto_sync_can_stop_after_current_source_and_resume_remaining(tmp_path, 
     assert resumed.status == "completed"
     assert resumed.processed_sources == 1
     assert seen_resume == ["Beta"]
+
+
+def test_auto_sync_curates_index_updates_to_avoid_page_sprawl():
+    payload = {
+        "topics": [
+            {"name": "Notes", "summary": "generic", "key_points": ["skip"], "open_questions": []},
+            {"name": "OpenClaw", "summary": "reuse", "key_points": ["one"], "open_questions": []},
+            {"name": "OpenClaw", "summary": "duplicate", "key_points": ["two"], "open_questions": []},
+            {"name": "Long Running Automation", "summary": "", "key_points": [], "open_questions": []},
+            {
+                "name": "Durable Indexing",
+                "summary": "keep",
+                "key_points": ["bounded topic"],
+                "open_questions": [],
+            },
+            {
+                "name": "Extra Topic",
+                "summary": "over cap",
+                "key_points": ["skip"],
+                "open_questions": [],
+            },
+        ],
+        "entities": [
+            {"name": "Article", "summary": "generic", "key_points": ["skip"], "open_questions": []},
+            {"name": "LMIT", "summary": "keep", "key_points": ["one"], "open_questions": []},
+            {"name": "OpenAI", "summary": "keep", "key_points": ["two"], "open_questions": []},
+            {"name": "LiteLLM", "summary": "keep", "key_points": ["three"], "open_questions": []},
+            {"name": "Gemini", "summary": "over cap", "key_points": ["skip"], "open_questions": []},
+        ],
+    }
+
+    curated = _curate_extracted_updates(
+        payload,
+        {
+            "topic": ["OpenClaw"],
+            "entity": [],
+        },
+    )
+
+    assert [item["name"] for item in curated["topics"]] == ["OpenClaw", "Durable Indexing"]
+    assert [item["name"] for item in curated["entities"]] == ["LMIT", "OpenAI", "LiteLLM"]

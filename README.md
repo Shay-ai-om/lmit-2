@@ -125,9 +125,10 @@ LMIT-2 classifies source visibility during ingest:
 - `restricted_or_login`
 - `local_private`
 
-External cloud LLM providers are allowed only for public-only source sets. Local
-or login-gated material is routed only to local/LAN providers such as Ollama or a
-private OpenAI-compatible endpoint.
+This visibility is recorded as source metadata. It does not block configured LLM
+profiles. LMIT-2 uses the profiles and fallback order you enable in LLM Settings,
+so automation can keep ingest, sync, and query flows moving while still leaving
+source visibility visible for review.
 
 ## Legacy Docker/NAS Notes
 

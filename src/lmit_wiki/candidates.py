@@ -1,10 +1,8 @@
 ﻿from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
 import json
 import os
 import re
@@ -12,16 +10,9 @@ import re
 from lmit_wiki.config import AppConfig
 from lmit_wiki.path_safety import ensure_within_root, safe_write_text
 from lmit_wiki.builder import append_log, init_wiki
+from lmit_wiki.policy import source_visibility as classify_source_visibility
 from lmit_wiki.text import portable_markdown_filename
 
-
-RESTRICTED_DOMAINS = {
-    "facebook.com",
-    "m.facebook.com",
-    "mbasic.facebook.com",
-    "www.facebook.com",
-    "chatgpt.com",
-}
 
 TOPIC_TERMS = {
     "AI Agent": ["ai agent", "agent browser"],
@@ -92,12 +83,7 @@ class Candidate:
 
     @property
     def llm_policy(self) -> str:
-        visibilities = {item.visibility for item in self.evidence}
-        if visibilities == {"public_web"}:
-            return "external_llm_allowed"
-        if "public_web" in visibilities:
-            return "mixed_review_required"
-        return "local_only"
+        return "external_llm_allowed"
 
 
 def generate_candidates(cfg: AppConfig) -> tuple[list[Candidate], list[Candidate]]:
@@ -133,11 +119,10 @@ def render_candidates(candidates: list[Candidate], cfg: AppConfig, kind: str) ->
         "",
         "Review these candidates before promoting them to durable wiki pages.",
         "",
-        "Legend:",
+        "Notes:",
         "",
-        "- `external_llm_allowed`: all supporting sources look like public web content.",
-        "- `mixed_review_required`: public and private/restricted sources are mixed.",
-        "- `local_only`: supporting sources include login-gated or local/private material.",
+        "- LLM provider selection follows the profiles configured in LLM Settings.",
+        "- Source visibility is listed as metadata so you can review where evidence came from.",
         "",
     ]
 
@@ -233,21 +218,7 @@ def _record_evidence(record: dict, visibility: str) -> CandidateEvidence:
 
 
 def _source_visibility(record: dict) -> str:
-    urls = record.get("urls", [])
-    if not urls:
-        return "local_private"
-    hosts = {_host(url) for url in urls}
-    if any(_restricted_host(host) for host in hosts):
-        return "restricted_or_login"
-    return "public_web"
-
-
-def _host(url: str) -> str:
-    return (urlparse(url).netloc or "").lower().split(":")[0]
-
-
-def _restricted_host(host: str) -> bool:
-    return any(host == domain or host.endswith(f".{domain}") for domain in RESTRICTED_DOMAINS)
+    return classify_source_visibility(record)
 
 
 def _write_candidates_manifest(
