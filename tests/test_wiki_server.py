@@ -8,6 +8,7 @@ from threading import Event
 from lmit_wiki.query import QueryAnswer
 from lmit_wiki.config import default_config, load_config, write_local_config
 from lmit_wiki.auto import AutoSyncResult, SyncedPage
+from lmit_wiki.runtime import save_runtime_settings
 from lmit_wiki.server import INDEX_HTML, ThreadingWSGIServer, WikiWebApp, server_pid_path, stop_wiki_ui
 
 
@@ -21,7 +22,7 @@ def test_web_ui_exposes_status_ingest_and_lint(tmp_path):
 
     status_payload = _call_json(app, "GET", "/api/status")
     assert status_payload["root_dir"] == str(cfg.wiki.root_dir)
-    assert status_payload["source_dirs"] == [str(raw_dir)]
+    assert status_payload["source_dirs"] == [str(raw_dir.resolve())]
     assert status_payload["root_exists"] is None
     assert status_payload["source_dir_status"][0]["exists"] is None
 
@@ -115,6 +116,57 @@ def test_web_ui_can_save_knowledge_base_and_source_paths(tmp_path):
     assert reloaded.wiki_ingest.source_dirs == (new_raw.resolve(),)
 
 
+def test_web_ui_save_paths_preserves_llm_settings_for_new_knowledge_base(tmp_path):
+    config_path = tmp_path / "wiki-only.toml"
+    cfg = write_local_config(
+        config_path,
+        root_dir=tmp_path / "initial_kb",
+        source_dirs=[tmp_path / "initial_raw"],
+    )
+    save_runtime_settings(
+        cfg,
+        {
+            "active_profile": "litellm-local",
+            "fallback_order": ["litellm-local"],
+            "profiles": [
+                {
+                    "id": "litellm-local",
+                    "provider": "openai_compatible",
+                    "label": "LiteLLM",
+                    "base_url": "http://localhost:4000",
+                    "model": "gpt-5",
+                    "api_key_env": "LITELLM_API_KEY",
+                    "enabled": True,
+                    "temperature": 0.1,
+                    "timeout_seconds": 300,
+                }
+            ],
+        },
+    )
+    app = WikiWebApp(cfg, config_path=config_path)
+
+    new_root = tmp_path / "selected_kb"
+    _call_json(
+        app,
+        "POST",
+        "/api/config",
+        {
+            "root_dir": str(new_root),
+            "source_dirs": [str(tmp_path / "selected_raw")],
+        },
+    )
+    settings = _call_json(app, "GET", "/api/settings")
+
+    assert settings["active_profile"] == "litellm-local"
+    assert settings["fallback_order"] == ["litellm-local"]
+    assert settings["profiles"][0]["id"] == "litellm-local"
+    assert settings["profiles"][0]["model"] == "gpt-5"
+    assert settings["profiles"][0]["enabled"] is True
+    assert json.loads((new_root / ".wiki_runtime.json").read_text(encoding="utf-8"))[
+        "active_profile"
+    ] == "litellm-local"
+
+
 def test_web_ui_links_manual_and_exposes_path_controls(tmp_path):
     cfg = default_config(tmp_path)
     app = WikiWebApp(cfg)
@@ -141,6 +193,12 @@ def test_web_ui_script_keeps_newline_escape_sequences():
     assert 'buffer.indexOf("\\n")' in INDEX_HTML
     assert 'split(/\\r?\\n|;/)' in INDEX_HTML
     assert 'buffer.indexOf("' + "\n" + '")' not in INDEX_HTML
+
+
+def test_web_ui_layout_keeps_long_paths_from_pushing_settings_panel():
+    assert "min-width: 0;" in INDEX_HTML
+    assert ".toolbar input:not([type=\"checkbox\"])" in INDEX_HTML
+    assert "flex: 1 1 220px;" in INDEX_HTML
 
 
 def test_document_route_serves_wiki_markdown_and_blocks_missing_paths(tmp_path):

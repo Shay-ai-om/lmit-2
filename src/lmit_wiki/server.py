@@ -324,7 +324,10 @@ class WikiWebApp:
                     search_limit=old_cfg.wiki_runtime.search_limit,
                     task_schedule=old_cfg.windows.task_schedule,
                 )
+                settings_already_exist = new_cfg.wiki_runtime.settings_path.exists()
                 init_wiki(new_cfg)
+                if not settings_already_exist:
+                    _preserve_runtime_settings(old_cfg, new_cfg)
                 with self._cfg_lock:
                     self.cfg = load_config(self.config_path)
                 return self._json(start_response, self._status_payload())
@@ -646,6 +649,15 @@ def _payload_source_dirs(value: object) -> list[Path]:
     return [Path(item) for item in items if item]
 
 
+def _preserve_runtime_settings(old_cfg: AppConfig, new_cfg: AppConfig) -> None:
+    old_path = old_cfg.wiki_runtime.settings_path
+    new_path = new_cfg.wiki_runtime.settings_path
+    if old_path.resolve() == new_path.resolve() or not old_path.exists():
+        return
+    settings = load_runtime_settings(old_cfg)
+    save_runtime_settings(new_cfg, runtime_settings_public_payload(settings))
+
+
 def _search_result_payload(cfg: AppConfig, result) -> dict[str, object]:
     payload = search_result_payload(result)
     payload["document_url"] = _document_url(result.rel_path)
@@ -737,7 +749,7 @@ INDEX_HTML = """<!doctype html>
       --radius: 8px;
     }
 
-    * { box-sizing: border-box; }
+    *, *::before, *::after { box-sizing: border-box; }
     body {
       margin: 0;
       font-family: "Segoe UI", "Noto Sans", sans-serif;
@@ -795,6 +807,7 @@ INDEX_HTML = """<!doctype html>
       border-radius: var(--radius);
       box-shadow: var(--shadow);
       padding: 20px;
+      min-width: 0;
     }
 
     h2 {
@@ -804,7 +817,11 @@ INDEX_HTML = """<!doctype html>
     }
 
     .stack { display: grid; gap: 14px; }
-    .toolbar { display: flex; gap: 10px; flex-wrap: wrap; }
+    .toolbar { display: flex; gap: 10px; flex-wrap: wrap; min-width: 0; }
+    .toolbar input:not([type="checkbox"]) {
+      flex: 1 1 220px;
+      min-width: 0;
+    }
     input:not([type="checkbox"]), textarea, select {
       width: 100%;
       padding: 12px 14px;
