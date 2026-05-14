@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import json
 import os
+import re
 
 from lmit_wiki.config import AppConfig
 from lmit_wiki.path_safety import ensure_within_root, safe_write_text
@@ -14,6 +15,9 @@ from lmit_wiki.policy import EXTERNAL_LLM_ALLOWED, llm_policy_for_sources
 from lmit_wiki.runtime import LLMCompletion, invoke_json_completion, invoke_text_completion
 from lmit_wiki.search import SearchResult, search_wiki
 from lmit_wiki.text import hashed_slug, strip_frontmatter
+
+
+CITATION_PATTERN = re.compile(r"\[S(?P<index>\d+)\]", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -25,6 +29,23 @@ class QueryAnswer:
     search_results: tuple[SearchResult, ...]
     completion: LLMCompletion | None
     saved_path: Path | None
+
+
+def cited_search_results(
+    answer_markdown: str,
+    search_results: tuple[SearchResult, ...],
+) -> tuple[tuple[int, SearchResult], ...]:
+    cited: list[tuple[int, SearchResult]] = []
+    seen: set[int] = set()
+    for match in CITATION_PATTERN.finditer(answer_markdown):
+        index = int(match.group("index"))
+        if index in seen or index < 1 or index > len(search_results):
+            continue
+        seen.add(index)
+        cited.append((index, search_results[index - 1]))
+    if cited:
+        return tuple(cited)
+    return tuple(enumerate(search_results, start=1))
 
 
 def answer_wiki_query(
@@ -348,10 +369,11 @@ def _render_query_page(
             "",
         ]
     )
-    if not answer.search_results:
+    cited_results = cited_search_results(answer.answer_markdown, answer.search_results)
+    if not cited_results:
         lines.append("- _No matching sources were found._")
     else:
-        for index, result in enumerate(answer.search_results, start=1):
+        for index, result in cited_results:
             link = _relative_link(cfg.wiki.queries_dir, result.path)
             lines.append(f"- [S{index}] [{result.title}]({link}) (`{result.kind}`)")
     if answer.follow_up_questions:

@@ -17,7 +17,7 @@ from lmit_wiki.builder import ingest_wiki, init_wiki, lint_wiki
 from lmit_wiki.config import AppConfig, load_config, write_local_config
 from lmit_wiki.auto import auto_sync_wiki, clear_sync_stop_request, request_sync_stop
 from lmit_wiki.path_safety import ensure_within_root
-from lmit_wiki.query import answer_wiki_query, stream_wiki_query_answer
+from lmit_wiki.query import QueryAnswer, answer_wiki_query, cited_search_results, stream_wiki_query_answer
 from lmit_wiki.runtime import (
     default_runtime_settings_payload,
     fetch_model_choices,
@@ -433,10 +433,10 @@ class WikiWebApp:
                         "answer_markdown": answer.answer_markdown,
                         "follow_up_questions": list(answer.follow_up_questions),
                         "saved_path": str(answer.saved_path) if answer.saved_path else None,
-                        "search_results": [
-                            _search_result_payload(self._current_cfg(), item)
-                            for item in answer.search_results
-                        ],
+                        "search_results": _query_search_result_payloads(
+                            self._current_cfg(),
+                            answer,
+                        ),
                         "llm": (
                             {
                                 "profile_id": answer.completion.profile_id,
@@ -620,10 +620,7 @@ class WikiWebApp:
                         "answer_markdown": answer.answer_markdown,
                         "follow_up_questions": list(answer.follow_up_questions),
                         "saved_path": str(answer.saved_path) if answer.saved_path else None,
-                        "search_results": [
-                            _search_result_payload(cfg, item)
-                            for item in answer.search_results
-                        ],
+                        "search_results": _query_search_result_payloads(cfg, answer),
                         "llm": (
                             {
                                 "profile_id": answer.completion.profile_id,
@@ -711,6 +708,15 @@ def _search_result_payload(cfg: AppConfig, result) -> dict[str, object]:
     payload["raw_rel_path"] = raw_rel_path
     payload["raw_url"] = _document_url(raw_rel_path) if raw_rel_path else None
     return payload
+
+
+def _query_search_result_payloads(cfg: AppConfig, answer: QueryAnswer) -> list[dict[str, object]]:
+    payloads: list[dict[str, object]] = []
+    for index, result in cited_search_results(answer.answer_markdown, answer.search_results):
+        payload = _search_result_payload(cfg, result)
+        payload["citation"] = f"S{index}"
+        payloads.append(payload)
+    return payloads
 
 
 def _raw_rel_path_for_result(cfg: AppConfig, result) -> str | None:
@@ -1879,9 +1885,10 @@ INDEX_HTML = """<!doctype html>
             if (item.raw_url && item.raw_url !== item.document_url) {
               links.push(`<a class="button-link secondary" href="${escapeAttribute(item.raw_url)}" target="_blank" rel="noopener">Open Raw</a>`);
             }
+            const citation = item.citation ? `[${escapeHtml(item.citation)}] ` : "";
             return `
               <div>
-                <div class="meta">${escapeHtml(item.title)} / ${escapeHtml(item.kind)} / ${escapeHtml(item.rel_path)}</div>
+                <div class="meta">${citation}${escapeHtml(item.title)} / ${escapeHtml(item.kind)} / ${escapeHtml(item.rel_path)}</div>
                 ${links.length ? `<div class="toolbar">${links.join("")}</div>` : ""}
               </div>
             `;

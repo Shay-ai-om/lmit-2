@@ -7,6 +7,7 @@ from pathlib import Path
 from threading import Event
 
 from lmit_wiki.query import QueryAnswer
+from lmit_wiki.search import SearchResult
 from lmit_wiki.config import default_config, load_config, write_local_config
 from lmit_wiki.auto import AutoSyncResult, SyncedPage
 from lmit_wiki.runtime import save_runtime_settings
@@ -520,6 +521,47 @@ def test_web_ui_streams_query_answer_chunks(tmp_path, monkeypatch):
     assert events[3]["type"] == "done"
     assert events[3]["title"] == "Changes"
     assert events[3]["follow_up_questions"] == ["What should we update next?"]
+
+
+def test_web_ui_streamed_query_sources_include_only_cited_results(tmp_path, monkeypatch):
+    cfg = default_config(tmp_path)
+    app = WikiWebApp(cfg)
+    source_paths = []
+    for index in range(1, 4):
+        path = cfg.wiki.root_dir / "wiki" / "sources" / f"source-{index}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# Source {index}\n\nBody {index}", encoding="utf-8")
+        source_paths.append(path)
+
+    def fake_stream_query(cfg_arg, question, *, save=True, on_chunk=None):
+        return QueryAnswer(
+            question=question,
+            title="Changes",
+            answer_markdown="Only source two was needed. [S2]",
+            follow_up_questions=(),
+            search_results=(
+                SearchResult("Source 1", "source", source_paths[0], "wiki/sources/source-1.md", 3, "one"),
+                SearchResult("Source 2", "source", source_paths[1], "wiki/sources/source-2.md", 2, "two"),
+                SearchResult("Source 3", "source", source_paths[2], "wiki/sources/source-3.md", 1, "three"),
+            ),
+            completion=None,
+            saved_path=None,
+        )
+
+    monkeypatch.setattr("lmit_wiki.server.stream_wiki_query_answer", fake_stream_query)
+
+    body = _call_text(
+        app,
+        "POST",
+        "/api/query/stream",
+        payload={"question": "what changed?", "save": False},
+        content_length=True,
+    )
+
+    done = [json.loads(line) for line in body.splitlines() if line.strip()][1]
+    assert done["type"] == "done"
+    assert [item["citation"] for item in done["search_results"]] == ["S2"]
+    assert [item["title"] for item in done["search_results"]] == ["Source 2"]
 
 
 def test_web_ui_fetches_model_choices_for_supported_providers(tmp_path, monkeypatch):
