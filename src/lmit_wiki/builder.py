@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -18,6 +18,14 @@ from lmit_wiki.runtime import ensure_runtime_settings_file
 from lmit_wiki.schema import SCHEMA_MARKDOWN
 from lmit_wiki.state import homepage_state, set_homepage_mode
 from lmit_wiki.text import excerpt, extract_urls, first_heading, source_note_name, strip_frontmatter
+
+
+@dataclass(frozen=True)
+class PageEntry:
+    title: str
+    rel_path: str
+    path: Path
+    text: str
 
 
 def init_wiki(cfg: AppConfig) -> None:
@@ -201,12 +209,48 @@ def refresh_index(
             "fallback_pending_llm" if ingest_mode == "fallback" else "sync_pending",
         )
     catalog_path = _source_catalog_path(cfg)
+    topic_catalog_path = _topic_catalog_path(cfg)
+    entity_catalog_path = _entity_catalog_path(cfg)
+    topic_entries = _page_entries(cfg.wiki.topics_dir, cfg.wiki.root_dir)
+    entity_entries = _page_entries(cfg.wiki.entities_dir, cfg.wiki.root_dir)
     safe_write_text(catalog_path, cfg.wiki.root_dir, render_source_catalog(docs, cfg, catalog_path))
-    _write_core_hub_pages(cfg, docs=docs, catalog_path=catalog_path)
+    safe_write_text(
+        topic_catalog_path,
+        cfg.wiki.root_dir,
+        render_page_catalog(
+            title="Topic Catalog",
+            item_label="topics",
+            entries=topic_entries,
+            catalog_path=topic_catalog_path,
+        ),
+    )
+    safe_write_text(
+        entity_catalog_path,
+        cfg.wiki.root_dir,
+        render_page_catalog(
+            title="Entity Catalog",
+            item_label="entities",
+            entries=entity_entries,
+            catalog_path=entity_catalog_path,
+        ),
+    )
+    _write_core_hub_pages(
+        cfg,
+        docs=docs,
+        catalog_path=catalog_path,
+        topic_catalog_path=topic_catalog_path,
+        entity_catalog_path=entity_catalog_path,
+    )
     safe_write_text(
         cfg.wiki.index_path,
         cfg.wiki.root_dir,
-        render_index(docs, cfg, catalog_path=catalog_path),
+        render_index(
+            docs,
+            cfg,
+            catalog_path=catalog_path,
+            topic_catalog_path=topic_catalog_path,
+            entity_catalog_path=entity_catalog_path,
+        ),
     )
     return catalog_path
 
@@ -216,6 +260,8 @@ def render_index(
     cfg: AppConfig,
     *,
     catalog_path: Path | None = None,
+    topic_catalog_path: Path | None = None,
+    entity_catalog_path: Path | None = None,
 ) -> str:
     topic_entries = _page_entries(cfg.wiki.topics_dir, cfg.wiki.root_dir)
     entity_entries = _page_entries(cfg.wiki.entities_dir, cfg.wiki.root_dir)
@@ -230,7 +276,13 @@ def render_index(
     recent_sync_summary = home.get("recent_sync_summary")
     recent_sync_pages = home.get("recent_sync_pages")
     catalog_path = catalog_path or _source_catalog_path(cfg)
+    topic_catalog_path = topic_catalog_path or _topic_catalog_path(cfg)
+    entity_catalog_path = entity_catalog_path or _entity_catalog_path(cfg)
     catalog_rel = _relative_link(cfg.wiki.index_path.parent, catalog_path)
+    topic_catalog_rel = _relative_link(cfg.wiki.index_path.parent, topic_catalog_path)
+    entity_catalog_rel = _relative_link(cfg.wiki.index_path.parent, entity_catalog_path)
+    featured_topic_entries = _featured_entries(topic_entries, home, limit=10)
+    featured_entity_entries = _featured_entries(entity_entries, home, limit=10)
     lines = [
         "# LMIT Wiki",
         "",
@@ -277,13 +329,25 @@ def render_index(
             "## Catalogs",
             "",
             f"- [Source Catalog]({catalog_rel})",
+            f"- [Topic Catalog]({topic_catalog_rel})",
+            f"- [Entity Catalog]({entity_catalog_rel})",
             "",
         ]
     )
     _append_index_section(lines, "Hub Pages", hub_entries, limit=10)
     _append_recent_sync_section(lines, recent_sync_summary, recent_sync_pages)
-    _append_index_section(lines, "Featured Topics", topic_entries, limit=10)
-    _append_index_section(lines, "Featured Entities", entity_entries, limit=10)
+    _append_index_section(
+        lines,
+        "Featured Topics",
+        featured_topic_entries,
+        total_count=len(topic_entries),
+    )
+    _append_index_section(
+        lines,
+        "Featured Entities",
+        featured_entity_entries,
+        total_count=len(entity_entries),
+    )
     _append_index_section(lines, "Recent Query Pages", query_entries, limit=10)
     return "\n".join(lines)
 
@@ -308,18 +372,49 @@ def render_source_catalog(docs: list[SourceDocument], cfg: AppConfig, catalog_pa
     return "\n".join(lines)
 
 
+def render_page_catalog(
+    *,
+    title: str,
+    item_label: str,
+    entries: list[PageEntry],
+    catalog_path: Path,
+) -> str:
+    lines = [
+        f"# {title}",
+        "",
+        f"Generated at UTC: {datetime.now(timezone.utc).isoformat()}",
+        "",
+        f"Total {item_label}: {len(entries)}",
+        "",
+    ]
+    if not entries:
+        lines.append("- _No pages yet._")
+        return "\n".join(lines)
+    for entry in sorted(entries, key=lambda item: (item.title.lower(), item.rel_path.lower())):
+        link = _relative_link(catalog_path.parent, entry.path)
+        lines.append(f"- [{entry.title}]({link})")
+    return "\n".join(lines)
+
+
 def render_knowledge_map_hub(
     cfg: AppConfig,
     *,
     docs: list[SourceDocument],
-    topic_entries: list[tuple[str, str]],
-    entity_entries: list[tuple[str, str]],
-    query_entries: list[tuple[str, str]],
+    topic_entries: list[PageEntry],
+    entity_entries: list[PageEntry],
+    query_entries: list[PageEntry],
     catalog_path: Path,
+    topic_catalog_path: Path,
+    entity_catalog_path: Path,
     hub_path: Path,
 ) -> str:
     homepage_link = _relative_link(hub_path.parent, cfg.wiki.index_path)
     catalog_link = _relative_link(hub_path.parent, catalog_path)
+    topic_catalog_link = _relative_link(hub_path.parent, topic_catalog_path)
+    entity_catalog_link = _relative_link(hub_path.parent, entity_catalog_path)
+    home = homepage_state(cfg)
+    featured_topic_entries = _featured_entries(topic_entries, home, limit=12)
+    featured_entity_entries = _featured_entries(entity_entries, home, limit=12)
     lines = [
         "# Knowledge Map",
         "",
@@ -329,14 +424,16 @@ def render_knowledge_map_hub(
         "",
         f"- Homepage: [LMIT Wiki]({homepage_link})",
         f"- Source Catalog: [Imported Sources]({catalog_link})",
+        f"- Topic Catalog: [All Topics]({topic_catalog_link})",
+        f"- Entity Catalog: [All Entities]({entity_catalog_link})",
         f"- Total sources: {len(docs)}",
         f"- Topic pages: {len(topic_entries)}",
         f"- Entity pages: {len(entity_entries)}",
         f"- Query pages: {len(query_entries)}",
         "",
     ]
-    _append_hub_link_section(lines, "Featured Topics", topic_entries, hub_path, limit=12)
-    _append_hub_link_section(lines, "Featured Entities", entity_entries, hub_path, limit=12)
+    _append_hub_link_section(lines, "Featured Topics", featured_topic_entries, hub_path, limit=12)
+    _append_hub_link_section(lines, "Featured Entities", featured_entity_entries, hub_path, limit=12)
     _append_hub_link_section(lines, "Recent Query Pages", query_entries, hub_path, limit=8)
     return "\n".join(lines)
 
@@ -344,7 +441,7 @@ def render_knowledge_map_hub(
 def render_recent_work_hub(
     cfg: AppConfig,
     *,
-    query_entries: list[tuple[str, str]],
+    query_entries: list[PageEntry],
     hub_path: Path,
 ) -> str:
     home = homepage_state(cfg)
@@ -528,10 +625,10 @@ def _page_entries(
     wiki_root: Path,
     *,
     sort_mode: str = "alphabetical",
-) -> list[tuple[str, str]]:
+) -> list[PageEntry]:
     if not root.exists():
         return []
-    entries: list[tuple[str, str]] = []
+    entries: list[PageEntry] = []
     paths = list(root.rglob("*.md"))
     if sort_mode == "newest_first":
         paths = sorted(paths, key=lambda item: item.name.lower(), reverse=True)
@@ -542,34 +639,101 @@ def _page_entries(
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         title = first_heading(strip_frontmatter(text), path.stem)
-        entries.append((title, path.relative_to(wiki_root).as_posix()))
+        entries.append(
+            PageEntry(
+                title=title,
+                rel_path=path.relative_to(wiki_root).as_posix(),
+                path=path,
+                text=text,
+            )
+        )
     return entries
 
 
-def _append_page_section(lines: list[str], entries: list[tuple[str, str]]) -> None:
+def _featured_entries(
+    entries: list[PageEntry],
+    home: dict[str, object],
+    *,
+    limit: int,
+) -> list[PageEntry]:
+    recent_rank = _recent_sync_page_rank(home)
+    return sorted(
+        entries,
+        key=lambda entry: _featured_sort_key(entry, recent_rank),
+    )[:limit]
+
+
+def _featured_sort_key(entry: PageEntry, recent_rank: dict[str, int]) -> tuple[int, int, int, int, str, str]:
+    rank = recent_rank.get(entry.rel_path)
+    return (
+        0 if _frontmatter_featured(entry.text) else 1,
+        0 if rank is not None else 1,
+        rank if rank is not None else 999_999,
+        -_source_hash_count(entry.text),
+        entry.title.lower(),
+        entry.rel_path.lower(),
+    )
+
+
+def _recent_sync_page_rank(home: dict[str, object]) -> dict[str, int]:
+    pages = home.get("recent_sync_pages")
+    if not isinstance(pages, list):
+        return {}
+    ranks: dict[str, int] = {}
+    for index, item in enumerate(pages):
+        if not isinstance(item, dict):
+            continue
+        rel_path = str(item.get("path") or "").strip()
+        if rel_path and rel_path not in ranks:
+            ranks[rel_path] = index
+    return ranks
+
+
+def _frontmatter_featured(text: str) -> bool:
+    if not text.startswith("---"):
+        return False
+    match = re.match(r"\A---\s*\n(?P<body>[\s\S]*?)\n---\s*(?:\n|\Z)", text)
+    if not match:
+        return False
+    for line in match.group("body").splitlines():
+        key, sep, value = line.partition(":")
+        if not sep or key.strip().lower() != "featured":
+            continue
+        normalized = value.strip().strip("'\"").lower()
+        return normalized in {"true", "yes", "1", "on"}
+    return False
+
+
+def _source_hash_count(text: str) -> int:
+    return len(re.findall(r"\bsource-hash\s*:", text, flags=re.IGNORECASE))
+
+
+def _append_page_section(lines: list[str], entries: list[PageEntry]) -> None:
     if not entries:
         lines.append("- _No pages yet._")
         lines.append("")
         return
-    for title, rel_path in entries:
-        lines.append(f"- [{title}]({rel_path})")
+    for entry in entries:
+        lines.append(f"- [{entry.title}]({entry.rel_path})")
     lines.append("")
 
 
 def _append_index_section(
     lines: list[str],
     title: str,
-    entries: list[tuple[str, str]],
+    entries: list[PageEntry],
     *,
     limit: int | None = None,
+    total_count: int | None = None,
 ) -> None:
     display_entries = entries[:limit] if limit is not None else entries
+    count = len(entries) if total_count is None else total_count
     lines.extend(
         [
             "",
             f"## {title}",
             "",
-            f"Total {title.lower()}: {len(entries)}",
+            f"Total {title.lower()}: {count}",
             "",
         ]
     )
@@ -613,7 +777,7 @@ def _append_recent_sync_section(
 def _append_hub_link_section(
     lines: list[str],
     title: str,
-    entries: list[tuple[str, str]],
+    entries: list[PageEntry],
     hub_path: Path,
     *,
     limit: int,
@@ -623,9 +787,9 @@ def _append_hub_link_section(
         lines.append("- _No pages yet._")
         lines.append("")
         return
-    for entry_title, rel_path in entries[:limit]:
-        link = _relative_link(hub_path.parent, hub_path.parents[2] / rel_path)
-        lines.append(f"- [{entry_title}]({link})")
+    for entry in entries[:limit]:
+        link = _relative_link(hub_path.parent, entry.path)
+        lines.append(f"- [{entry.title}]({link})")
     lines.append("")
 
 
@@ -634,6 +798,8 @@ def _write_core_hub_pages(
     *,
     docs: list[SourceDocument],
     catalog_path: Path,
+    topic_catalog_path: Path,
+    entity_catalog_path: Path,
 ) -> None:
     hub_dir = _hubs_dir(cfg)
     topic_entries = _page_entries(cfg.wiki.topics_dir, cfg.wiki.root_dir)
@@ -654,6 +820,8 @@ def _write_core_hub_pages(
             entity_entries=entity_entries,
             query_entries=query_entries,
             catalog_path=catalog_path,
+            topic_catalog_path=topic_catalog_path,
+            entity_catalog_path=entity_catalog_path,
             hub_path=hub_dir / "knowledge-map.md",
         ),
     )
@@ -727,6 +895,14 @@ def _hubs_dir(cfg: AppConfig) -> Path:
 
 def _source_catalog_path(cfg: AppConfig) -> Path:
     return _system_dir(cfg) / "sources.md"
+
+
+def _topic_catalog_path(cfg: AppConfig) -> Path:
+    return _system_dir(cfg) / "topics.md"
+
+
+def _entity_catalog_path(cfg: AppConfig) -> Path:
+    return _system_dir(cfg) / "entities.md"
 
 
 def _source_roots(

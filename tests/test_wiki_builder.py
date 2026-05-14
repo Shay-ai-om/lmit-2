@@ -4,6 +4,7 @@ from lmit_wiki.builder import ingest_wiki
 from lmit_wiki.builder import init_wiki, refresh_index
 from lmit_wiki.config import default_config
 from lmit_wiki.search import search_wiki
+from lmit_wiki.state import record_recent_sync
 
 
 def test_ingest_writes_compact_homepage_and_source_catalog(tmp_path):
@@ -85,6 +86,92 @@ def test_refresh_index_writes_core_hub_pages_and_links_homepage(tmp_path):
     assert (hub_dir / "open-questions.md").exists()
     assert "## Hub Pages" in homepage
     assert "Knowledge Map" in homepage
+
+
+def test_refresh_index_writes_topic_and_entity_catalog_pages(tmp_path):
+    cfg = default_config(tmp_path)
+    init_wiki(cfg)
+    (cfg.wiki.topics_dir / "alpha.md").write_text("# Alpha Topic\n", encoding="utf-8")
+    (cfg.wiki.topics_dir / "beta.md").write_text("# Beta Topic\n", encoding="utf-8")
+    (cfg.wiki.entities_dir / "acme.md").write_text("# ACME Entity\n", encoding="utf-8")
+
+    refresh_index(cfg)
+
+    topic_catalog = cfg.wiki.root_dir / "wiki" / "system" / "topics.md"
+    entity_catalog = cfg.wiki.root_dir / "wiki" / "system" / "entities.md"
+    homepage = cfg.wiki.index_path.read_text(encoding="utf-8")
+    knowledge_map = (cfg.wiki.root_dir / "wiki" / "hubs" / "knowledge-map.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert topic_catalog.exists()
+    assert entity_catalog.exists()
+    assert "Total topics: 2" in topic_catalog.read_text(encoding="utf-8")
+    assert "[Alpha Topic]" in topic_catalog.read_text(encoding="utf-8")
+    assert "[Beta Topic]" in topic_catalog.read_text(encoding="utf-8")
+    assert "Total entities: 1" in entity_catalog.read_text(encoding="utf-8")
+    assert "[ACME Entity]" in entity_catalog.read_text(encoding="utf-8")
+    assert "Topic Catalog" in homepage
+    assert "Entity Catalog" in homepage
+    assert "Topic Catalog" in knowledge_map
+    assert "Entity Catalog" in knowledge_map
+
+
+def test_featured_topics_and_entities_use_featured_and_recent_signals(tmp_path):
+    cfg = default_config(tmp_path)
+    init_wiki(cfg)
+    for index in range(12):
+        (cfg.wiki.topics_dir / f"aaa-{index:02d}.md").write_text(
+            f"# Alphabetical Topic {index:02d}\n",
+            encoding="utf-8",
+        )
+        (cfg.wiki.entities_dir / f"aaa-{index:02d}.md").write_text(
+            f"# Alphabetical Entity {index:02d}\n",
+            encoding="utf-8",
+        )
+    (cfg.wiki.topics_dir / "zzz-featured.md").write_text(
+        "---\nfeatured: true\n---\n\n# Featured Topic\n",
+        encoding="utf-8",
+    )
+    (cfg.wiki.topics_dir / "zzz-supported.md").write_text(
+        "# Supported Topic\n\n"
+        "## LMIT Auto Updates\n\n"
+        "### 2026-05-14 | Source A | source-hash: aaaaaaaa1111\n\n"
+        "### 2026-05-14 | Source B | source-hash: bbbbbbbb2222\n",
+        encoding="utf-8",
+    )
+    recent_entity = cfg.wiki.entities_dir / "zzz-recent.md"
+    recent_entity.write_text("# Recent Entity\n", encoding="utf-8")
+    record_recent_sync(
+        cfg,
+        status="completed",
+        processed_sources=1,
+        created_pages=1,
+        updated_pages=0,
+        pages=[
+            {
+                "name": "Recent Entity",
+                "kind": "entity",
+                "path": recent_entity.relative_to(cfg.wiki.root_dir).as_posix(),
+                "action": "updated",
+            }
+        ],
+    )
+
+    refresh_index(cfg)
+
+    homepage = cfg.wiki.index_path.read_text(encoding="utf-8")
+    topic_section = homepage.split("## Featured Topics", 1)[1].split("## Featured Entities", 1)[0]
+    entity_section = homepage.split("## Featured Entities", 1)[1].split(
+        "## Recent Query Pages",
+        1,
+    )[0]
+    assert "- [Featured Topic]" in topic_section
+    assert "- [Supported Topic]" in topic_section
+    assert "- [Recent Entity]" in entity_section
+    assert topic_section.index("Featured Topic") < topic_section.index("Alphabetical Topic 00")
+    assert topic_section.index("Supported Topic") < topic_section.index("Alphabetical Topic 00")
+    assert entity_section.index("Recent Entity") < entity_section.index("Alphabetical Entity 00")
 
 
 def test_open_questions_hub_collects_questions_from_topic_and_entity_pages(tmp_path):
