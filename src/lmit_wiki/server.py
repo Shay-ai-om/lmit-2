@@ -48,6 +48,8 @@ class SyncJobState:
     current_relative_path: str | None = None
     created_pages: int = 0
     updated_pages: int = 0
+    failed_source_count: int = 0
+    failed_sources: list[dict[str, str]] = field(default_factory=list)
     pages: list[dict[str, str]] = field(default_factory=list)
     error: str | None = None
     stop_requested: bool = False
@@ -67,6 +69,8 @@ class SyncJobState:
             "current_relative_path": self.current_relative_path,
             "created_pages": self.created_pages,
             "updated_pages": self.updated_pages,
+            "failed_source_count": self.failed_source_count,
+            "failed_sources": self.failed_sources,
             "pages": self.pages,
             "error": self.error,
             "stop_requested": self.stop_requested,
@@ -154,6 +158,7 @@ class SyncJobManager:
                 current_relative_path=_str_or_none(update.get("current_relative_path")),
                 created_pages=_int_or_zero(update.get("created_pages")),
                 updated_pages=_int_or_zero(update.get("updated_pages")),
+                failed_source_count=_int_or_zero(update.get("failed_source_count")),
             )
 
         try:
@@ -163,14 +168,26 @@ class SyncJobManager:
                 progress=report_progress,
                 should_stop=lambda: self._job_should_stop(job_id),
             )
-            final_status = "stopped" if result.status == "stopped" else "completed"
+            final_status = (
+                "stopped"
+                if result.status == "stopped"
+                else (
+                    "completed_with_errors"
+                    if result.status == "completed_with_errors"
+                    else "completed"
+                )
+            )
             final_message = (
                 f"Sync stopped after processing {result.processed_sources} source(s)."
                 if result.status == "stopped"
                 else (
-                    "Sync finished with no wiki page changes."
-                    if not result.pages
-                    else f"Sync finished. Created {result.created_pages} page(s) and updated {result.updated_pages} page(s)."
+                    f"Sync finished with {len(result.failed_sources)} failed source(s)."
+                    if result.failed_sources
+                    else (
+                        "Sync finished with no wiki page changes."
+                        if not result.pages
+                        else f"Sync finished. Created {result.created_pages} page(s) and updated {result.updated_pages} page(s)."
+                    )
                 )
             )
             self._update_job(
@@ -180,8 +197,17 @@ class SyncJobManager:
                 processed_sources=result.processed_sources,
                 created_pages=result.created_pages,
                 updated_pages=result.updated_pages,
+                failed_source_count=len(result.failed_sources),
                 message=final_message,
                 stop_requested=False,
+                failed_sources=[
+                    {
+                        "title": failed.title,
+                        "relative_path": failed.relative_path,
+                        "error": failed.error,
+                    }
+                    for failed in result.failed_sources
+                ],
                 pages=[
                     {
                         "name": page.name,
@@ -324,10 +350,8 @@ class WikiWebApp:
                     search_limit=old_cfg.wiki_runtime.search_limit,
                     task_schedule=old_cfg.windows.task_schedule,
                 )
-                settings_already_exist = new_cfg.wiki_runtime.settings_path.exists()
                 init_wiki(new_cfg)
-                if not settings_already_exist:
-                    _preserve_runtime_settings(old_cfg, new_cfg)
+                _preserve_runtime_settings(old_cfg, new_cfg)
                 with self._cfg_lock:
                     self.cfg = load_config(self.config_path)
                 return self._json(start_response, self._status_payload())
@@ -796,7 +820,7 @@ INDEX_HTML = """<!doctype html>
 
     .grid {
       display: grid;
-      grid-template-columns: 1.15fr 0.85fr;
+      grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);
       gap: 24px;
       align-items: start;
     }
@@ -816,7 +840,7 @@ INDEX_HTML = """<!doctype html>
       letter-spacing: -0.02em;
     }
 
-    .stack { display: grid; gap: 14px; }
+    .stack { display: grid; gap: 14px; min-width: 0; }
     .toolbar { display: flex; gap: 10px; flex-wrap: wrap; min-width: 0; }
     .toolbar input:not([type="checkbox"]) {
       flex: 1 1 220px;
@@ -824,6 +848,7 @@ INDEX_HTML = """<!doctype html>
     }
     input:not([type="checkbox"]), textarea, select {
       width: 100%;
+      min-width: 0;
       padding: 12px 14px;
       border-radius: 8px;
       border: 1px solid var(--line);
@@ -921,6 +946,8 @@ INDEX_HTML = """<!doctype html>
       font-size: 12px;
       color: var(--muted);
       word-break: break-all;
+      overflow-wrap: anywhere;
+      min-width: 0;
     }
 
     .path-input {
@@ -1321,7 +1348,6 @@ INDEX_HTML = """<!doctype html>
           body: JSON.stringify(payload)
         }, 20);
         await loadStatus();
-        await loadSettings();
         status("pathStatus", "Paths saved. This did not run Ingest or call an LLM.");
       } catch (error) {
         status("pathStatus", `Save failed: ${error.message}`);
@@ -1617,6 +1643,9 @@ INDEX_HTML = """<!doctype html>
       }
       progressParts.push(`created ${job.created_pages || 0}`);
       progressParts.push(`updated ${job.updated_pages || 0}`);
+      if (job.failed_source_count) {
+        progressParts.push(`failed ${job.failed_source_count}`);
+      }
       const detailLines = [];
       if (job.current_source_title) {
         detailLines.push(`<div>Current source: ${escapeHtml(job.current_source_title)}</div>`);
@@ -1634,6 +1663,17 @@ INDEX_HTML = """<!doctype html>
         ${detailLines.join("")}
       `;
       root.appendChild(summary);
+
+      for (const failed of (job.failed_sources || []).slice(0, 12)) {
+        const item = document.createElement("div");
+        item.className = "result";
+        item.innerHTML = `
+          <h3>${escapeHtml(failed.title || "Failed source")}</h3>
+          <div class="meta">${escapeHtml(failed.relative_path || "")}</div>
+          <div>${escapeHtml(failed.error || "")}</div>
+        `;
+        root.appendChild(item);
+      }
 
       for (const page of job.pages || []) {
         const item = document.createElement("div");
@@ -1654,7 +1694,7 @@ INDEX_HTML = """<!doctype html>
     }
 
     function titleCase(value) {
-      const text = String(value || "").trim();
+      const text = String(value || "").trim().replaceAll("_", " ");
       if (!text) {
         return "";
       }

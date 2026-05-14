@@ -146,6 +146,29 @@ def test_web_ui_save_paths_preserves_llm_settings_for_new_knowledge_base(tmp_pat
     app = WikiWebApp(cfg, config_path=config_path)
 
     new_root = tmp_path / "selected_kb"
+    existing_cfg = write_local_config(
+        tmp_path / "existing-kb.toml",
+        root_dir=new_root,
+        source_dirs=[tmp_path / "selected_raw"],
+    )
+    save_runtime_settings(
+        existing_cfg,
+        {
+            "active_profile": "ollama-local",
+            "fallback_order": ["ollama-local"],
+            "profiles": [
+                {
+                    "id": "ollama-local",
+                    "provider": "ollama",
+                    "label": "Old Target Setting",
+                    "base_url": "http://localhost:11434/api",
+                    "model": "old-model",
+                    "api_key_env": "",
+                    "enabled": False,
+                }
+            ],
+        },
+    )
     _call_json(
         app,
         "POST",
@@ -197,8 +220,18 @@ def test_web_ui_script_keeps_newline_escape_sequences():
 
 def test_web_ui_layout_keeps_long_paths_from_pushing_settings_panel():
     assert "min-width: 0;" in INDEX_HTML
+    assert "grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);" in INDEX_HTML
     assert ".toolbar input:not([type=\"checkbox\"])" in INDEX_HTML
     assert "flex: 1 1 220px;" in INDEX_HTML
+    assert "overflow-wrap: anywhere;" in INDEX_HTML
+
+
+def test_save_paths_does_not_reload_llm_settings_panel():
+    start = INDEX_HTML.index("async function savePaths()")
+    end = INDEX_HTML.index("function renderProfiles", start)
+    save_paths_body = INDEX_HTML[start:end]
+
+    assert "loadSettings()" not in save_paths_body
 
 
 def test_document_route_serves_wiki_markdown_and_blocks_missing_paths(tmp_path):

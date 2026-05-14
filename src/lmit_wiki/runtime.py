@@ -278,10 +278,16 @@ def invoke_text_completion(
 ) -> LLMCompletion:
     settings = load_runtime_settings(cfg)
     attempts: list[str] = []
-    providers = filter_profiles_for_policy(settings.ordered_profiles(), llm_policy)
+    ordered_profiles = settings.ordered_profiles()
+    if not ordered_profiles:
+        raise LLMInvocationError(
+            "No enabled LLM profiles are configured. "
+            "Open LLM Settings, enable at least one profile, save settings, then resume sync."
+        )
+    providers = filter_profiles_for_policy(ordered_profiles, llm_policy)
     if not providers:
         raise LLMInvocationError(
-            f"No LLM profiles are allowed for {llm_policy} policy."
+            f"No LLM profiles are available for {llm_policy} policy."
         )
 
     for profile in providers:

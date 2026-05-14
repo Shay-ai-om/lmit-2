@@ -7,6 +7,7 @@ from lmit_wiki.config import default_config
 from lmit_wiki.builder import init_wiki
 from lmit_wiki.runtime import (
     invoke_text_completion,
+    LLMInvocationError,
     load_runtime_settings,
     parse_json_document,
     RuntimeSettingsError,
@@ -14,6 +15,26 @@ from lmit_wiki.runtime import (
     save_runtime_settings,
 )
 from lmit_wiki.server import INDEX_HTML
+
+
+def test_no_enabled_profiles_message_points_to_llm_settings(tmp_path):
+    cfg = default_config(tmp_path)
+    init_wiki(cfg)
+
+    try:
+        invoke_text_completion(
+            cfg,
+            [{"role": "user", "content": "hello"}],
+            purpose="sync preflight",
+        )
+    except LLMInvocationError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected missing enabled profile error")
+
+    assert "No enabled LLM profiles are configured" in message
+    assert "LLM Settings" in message
+    assert "policy" not in message
 
 
 def test_runtime_settings_serializes_api_key_env_not_secret(tmp_path):

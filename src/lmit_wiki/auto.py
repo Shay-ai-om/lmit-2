@@ -11,7 +11,7 @@ from lmit_wiki.config import AppConfig
 from lmit_wiki.path_safety import ensure_within_root, safe_write_text
 from lmit_wiki.builder import append_log, init_wiki, refresh_index
 from lmit_wiki.policy import llm_policy_for_sources
-from lmit_wiki.runtime import invoke_json_completion
+from lmit_wiki.runtime import LLMInvocationError, invoke_json_completion
 from lmit_wiki.text import portable_markdown_filename, strip_frontmatter
 
 
@@ -45,12 +45,20 @@ class SyncedPage:
 
 
 @dataclass(frozen=True)
+class FailedSource:
+    title: str
+    relative_path: str
+    error: str
+
+
+@dataclass(frozen=True)
 class AutoSyncResult:
     processed_sources: int
     created_pages: int
     updated_pages: int
     pages: tuple[SyncedPage, ...]
     status: str = "completed"
+    failed_sources: tuple[FailedSource, ...] = ()
 
 
 def auto_sync_wiki(
@@ -92,6 +100,7 @@ def auto_sync_wiki(
     )
 
     pages: list[SyncedPage] = []
+    failed_sources: list[FailedSource] = []
     catalog = _page_catalog(cfg)
     kind_keys = {
         "topic": "topics",
@@ -112,13 +121,43 @@ def auto_sync_wiki(
             current_relative_path=str(record.get("relative_path") or ""),
             message=f"Syncing source {index} of {total_sources}: {record.get('title', 'Untitled')}",
         )
-        extracted = _extract_source_updates(cfg, record, catalog)
-        for kind, key in kind_keys.items():
-            for item in extracted.get(key, []):
-                synced = _upsert_page(cfg, record, kind, item)
-                pages.append(synced)
-                catalog[kind].append(item["name"])
-        state["processed_sources"][str(record["relative_path"])] = str(record.get("content_hash", ""))
+        try:
+            extracted = _extract_source_updates(cfg, record, catalog)
+            for kind, key in kind_keys.items():
+                for item in extracted.get(key, []):
+                    synced = _upsert_page(cfg, record, kind, item)
+                    pages.append(synced)
+                    catalog[kind].append(item["name"])
+            state["processed_sources"][str(record["relative_path"])] = str(record.get("content_hash", ""))
+            _clear_failed_source(state, record)
+        except LLMInvocationError as exc:
+            failed = _record_failed_source(state, record, exc)
+            failed_sources.append(failed)
+            _save_state(cfg, state)
+            _report_progress(
+                progress,
+                stage="source_failed",
+                total_sources=total_sources,
+                source_index=index,
+                processed_sources=index,
+                created_pages=created_so_far,
+                updated_pages=updated_so_far,
+                failed_source_count=len(failed_sources),
+                current_source_title=failed.title,
+                current_relative_path=failed.relative_path,
+                last_error=failed.error,
+                message=f"Skipped source {index} of {total_sources} after LLM failure: {failed.title}",
+            )
+            if _stop_requested(cfg, should_stop):
+                return _stopped_result(
+                    cfg,
+                    progress=progress,
+                    processed_sources=index,
+                    total_sources=total_sources,
+                    pages=pages,
+                    failed_sources=failed_sources,
+                )
+            continue
         _save_state(cfg, state)
         created_so_far = sum(1 for page in pages if page.action == "created")
         updated_so_far = sum(1 for page in pages if page.action == "updated")
@@ -130,6 +169,7 @@ def auto_sync_wiki(
             processed_sources=index,
             created_pages=created_so_far,
             updated_pages=updated_so_far,
+            failed_source_count=len(failed_sources),
             current_source_title=str(record.get("title") or "Untitled"),
             current_relative_path=str(record.get("relative_path") or ""),
             message=f"Finished source {index} of {total_sources}: {record.get('title', 'Untitled')}",
@@ -141,29 +181,40 @@ def auto_sync_wiki(
                 processed_sources=index,
                 total_sources=total_sources,
                 pages=pages,
+                failed_sources=failed_sources,
             )
 
     clear_sync_stop_request(cfg)
-    if pages:
+    if pages or failed_sources:
         append_log(
             cfg,
-            f"LLM auto-synced {len(pending)} source(s) into {len(pages)} topic/entity page updates",
+            (
+                f"LLM auto-synced {len(pending)} source(s) into {len(pages)} "
+                f"topic/entity page updates with {len(failed_sources)} failed source(s)"
+            ),
         )
+    if pages:
         refresh_index(cfg)
 
     created = sum(1 for page in pages if page.action == "created")
     updated = sum(1 for page in pages if page.action == "updated")
+    status = "completed_with_errors" if failed_sources else "completed"
     _report_progress(
         progress,
-        stage="complete",
+        stage=status,
         total_sources=total_sources,
         processed_sources=len(pending),
         created_pages=created,
         updated_pages=updated,
+        failed_source_count=len(failed_sources),
         message=(
-            "Sync finished with no wiki page changes."
-            if not pages
-            else f"Sync finished. Created {created} page(s) and updated {updated} page(s)."
+            f"Sync finished with {len(failed_sources)} failed source(s)."
+            if failed_sources
+            else (
+                "Sync finished with no wiki page changes."
+                if not pages
+                else f"Sync finished. Created {created} page(s) and updated {updated} page(s)."
+            )
         ),
     )
     return AutoSyncResult(
@@ -171,7 +222,8 @@ def auto_sync_wiki(
         created_pages=created,
         updated_pages=updated,
         pages=tuple(pages),
-        status="completed",
+        status=status,
+        failed_sources=tuple(failed_sources),
     )
 
 
@@ -499,13 +551,48 @@ def _titles_in_dir(root: Path) -> list[str]:
     return titles
 
 
+def _record_failed_source(
+    state: dict[str, object],
+    record: dict[str, object],
+    exc: Exception,
+) -> FailedSource:
+    failed_sources = state.setdefault("failed_sources", {})
+    if not isinstance(failed_sources, dict):
+        failed_sources = {}
+        state["failed_sources"] = failed_sources
+    relative_path = str(record.get("relative_path") or "")
+    failed = FailedSource(
+        title=str(record.get("title") or "Untitled"),
+        relative_path=relative_path,
+        error=str(exc),
+    )
+    failed_sources[relative_path] = {
+        "content_hash": str(record.get("content_hash", "")),
+        "title": failed.title,
+        "relative_path": failed.relative_path,
+        "error": failed.error,
+        "failed_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    return failed
+
+
+def _clear_failed_source(state: dict[str, object], record: dict[str, object]) -> None:
+    failed_sources = state.get("failed_sources")
+    if isinstance(failed_sources, dict):
+        failed_sources.pop(str(record.get("relative_path") or ""), None)
+
+
 def _load_state(cfg: AppConfig) -> dict[str, object]:
     if not cfg.wiki_runtime.state_path.exists():
         return {
             "version": 1,
             "processed_sources": {},
+            "failed_sources": {},
         }
-    return json.loads(cfg.wiki_runtime.state_path.read_text(encoding="utf-8"))
+    state = json.loads(cfg.wiki_runtime.state_path.read_text(encoding="utf-8"))
+    state.setdefault("processed_sources", {})
+    state.setdefault("failed_sources", {})
+    return state
 
 
 def _save_state(cfg: AppConfig, state: dict[str, object]) -> None:
@@ -529,6 +616,7 @@ def _stopped_result(
     processed_sources: int,
     total_sources: int,
     pages: list[SyncedPage],
+    failed_sources: list[FailedSource],
 ) -> AutoSyncResult:
     clear_sync_stop_request(cfg)
     created = sum(1 for page in pages if page.action == "created")
@@ -544,6 +632,7 @@ def _stopped_result(
         processed_sources=processed_sources,
         created_pages=created,
         updated_pages=updated,
+        failed_source_count=len(failed_sources),
         message=f"Sync stopped after processing {processed_sources} source(s).",
     )
     return AutoSyncResult(
@@ -552,6 +641,7 @@ def _stopped_result(
         updated_pages=updated,
         pages=tuple(pages),
         status="stopped",
+        failed_sources=tuple(failed_sources),
     )
 
 

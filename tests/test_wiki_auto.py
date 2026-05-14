@@ -7,6 +7,7 @@ import pytest
 from lmit_wiki.auto import auto_sync_wiki, _curate_extracted_updates
 from lmit_wiki.builder import ingest_wiki
 from lmit_wiki.config import default_config
+from lmit_wiki.runtime import LLMInvocationError
 
 
 def test_auto_sync_saves_completed_progress_before_later_failure(tmp_path, monkeypatch):
@@ -70,6 +71,53 @@ def test_auto_sync_resume_skips_sources_already_saved_in_state(tmp_path, monkeyp
 
     assert result.processed_sources == 1
     assert resumed_calls == ["Beta"]
+
+
+def test_auto_sync_records_llm_failures_and_continues_sources(tmp_path, monkeypatch):
+    cfg = default_config(tmp_path)
+    raw_dir = cfg.wiki_ingest.source_dirs[0]
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / "alpha.md").write_text("# Alpha\n\none", encoding="utf-8")
+    (raw_dir / "beta.md").write_text("# Beta\n\ntwo", encoding="utf-8")
+    ingest_wiki(cfg)
+
+    calls: list[str] = []
+
+    def fail_first_source(cfg_arg, record, catalog):
+        calls.append(str(record["title"]))
+        if len(calls) == 1:
+            raise LLMInvocationError("provider timed out")
+        return {
+            "topics": [
+                {
+                    "name": "Beta Topic",
+                    "summary": "Beta summary",
+                    "key_points": ["Beta point"],
+                    "open_questions": [],
+                }
+            ],
+            "entities": [],
+        }
+
+    monkeypatch.setattr("lmit_wiki.auto._extract_source_updates", fail_first_source)
+
+    result = auto_sync_wiki(cfg)
+
+    assert result.status == "completed_with_errors"
+    assert result.processed_sources == 2
+    assert [failed.title for failed in result.failed_sources] == ["Alpha"]
+    assert [page.name for page in result.pages] == ["Beta Topic"]
+    manifest = json.loads((cfg.wiki.root_dir / "manifest.json").read_text(encoding="utf-8"))
+    alpha_record, beta_record = manifest["sources"]
+    state = json.loads(cfg.wiki_runtime.state_path.read_text(encoding="utf-8"))
+    failed = state["failed_sources"][alpha_record["relative_path"]]
+    assert failed["content_hash"] == alpha_record["content_hash"]
+    assert failed["title"] == "Alpha"
+    assert failed["relative_path"] == alpha_record["relative_path"]
+    assert failed["error"] == "provider timed out"
+    assert state["processed_sources"] == {
+        beta_record["relative_path"]: beta_record["content_hash"]
+    }
 
 
 def test_auto_sync_can_stop_after_current_source_and_resume_remaining(tmp_path, monkeypatch):
