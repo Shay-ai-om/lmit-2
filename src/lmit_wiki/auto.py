@@ -628,6 +628,8 @@ def _stopped_result(
         cfg,
         f"LLM auto sync stopped after processing {processed_sources} source(s)",
     )
+    if pages or failed_sources:
+        refresh_index(cfg)
     _report_progress(
         progress,
         stage="stopped",

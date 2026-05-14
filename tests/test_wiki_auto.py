@@ -160,6 +160,45 @@ def test_auto_sync_can_stop_after_current_source_and_resume_remaining(tmp_path, 
     assert seen_resume == ["Beta"]
 
 
+def test_auto_sync_stop_refreshes_homepage_after_partial_page_updates(tmp_path, monkeypatch):
+    cfg = default_config(tmp_path)
+    raw_dir = cfg.wiki_ingest.source_dirs[0]
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / "alpha.md").write_text("# Alpha\n\none", encoding="utf-8")
+    (raw_dir / "beta.md").write_text("# Beta\n\ntwo", encoding="utf-8")
+    ingest_wiki(cfg)
+
+    should_stop = {"value": False}
+
+    def fake_extract(cfg_arg, record, catalog):
+        return {
+            "topics": [
+                {
+                    "name": "Alpha Topic",
+                    "summary": "Partial sync summary",
+                    "key_points": ["Partial sync point"],
+                    "open_questions": [],
+                }
+            ],
+            "entities": [],
+        }
+
+    def progress(update: dict[str, object]) -> None:
+        if update.get("stage") == "source_complete":
+            should_stop["value"] = True
+
+    monkeypatch.setattr("lmit_wiki.auto._extract_source_updates", fake_extract)
+
+    stopped = auto_sync_wiki(cfg, progress=progress, should_stop=lambda: should_stop["value"])
+
+    homepage = cfg.wiki.index_path.read_text(encoding="utf-8")
+    assert stopped.status == "stopped"
+    assert "## Next Step" not in homepage
+    assert "Recent Sync Changes" in homepage
+    assert "Alpha Topic" in homepage
+    assert "Status: stopped" in homepage
+
+
 def test_auto_sync_curates_index_updates_to_avoid_page_sprawl():
     payload = {
         "topics": [
