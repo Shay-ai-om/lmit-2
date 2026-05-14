@@ -74,6 +74,18 @@ def test_web_ui_search_results_include_document_and_raw_links(tmp_path):
         assert first["raw_url"]
 
 
+def test_web_ui_can_clear_search_results(tmp_path):
+    cfg = default_config(tmp_path)
+    app = WikiWebApp(cfg)
+
+    html = _call_html(app, "GET", "/")
+
+    assert 'onclick="clearSearchResults()"' in html
+    assert "function clearSearchResults()" in html
+    assert 'document.getElementById("searchResults").innerHTML = "";' in html
+    assert 'status("searchStatus", "");' in html
+
+
 def test_web_ui_exposes_llm_profile_controls_and_default_restore(tmp_path):
     cfg = default_config(tmp_path)
     app = WikiWebApp(cfg)

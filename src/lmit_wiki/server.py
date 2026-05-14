@@ -1089,6 +1089,7 @@ INDEX_HTML = """<!doctype html>
           <div class="toolbar">
             <input id="searchInput" placeholder="Search the wiki, source notes, and raw markdown">
             <button onclick="runSearch()">Search</button>
+            <button class="secondary" onclick="clearSearchResults()">Clear</button>
           </div>
         </div>
         <div id="searchStatus" class="status"></div>
@@ -1754,6 +1755,11 @@ INDEX_HTML = """<!doctype html>
         root.appendChild(div);
       }
       status("searchStatus", `${(data.results || []).length} result(s).`);
+    }
+
+    function clearSearchResults() {
+      document.getElementById("searchResults").innerHTML = "";
+      status("searchStatus", "");
     }
 
     async function runQuery(save) {
