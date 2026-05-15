@@ -334,21 +334,36 @@ def render_index(
             "",
         ]
     )
-    _append_index_section(lines, "Hub Pages", hub_entries, limit=10)
-    _append_recent_sync_section(lines, recent_sync_summary, recent_sync_pages)
+    index_dir = cfg.wiki.index_path.parent
+    _append_index_section(lines, "Hub Pages", hub_entries, from_dir=index_dir, limit=10)
+    _append_recent_sync_section(
+        lines,
+        recent_sync_summary,
+        recent_sync_pages,
+        from_dir=index_dir,
+        wiki_root=cfg.wiki.root_dir,
+    )
     _append_index_section(
         lines,
         "Featured Topics",
         featured_topic_entries,
+        from_dir=index_dir,
         total_count=len(topic_entries),
     )
     _append_index_section(
         lines,
         "Featured Entities",
         featured_entity_entries,
+        from_dir=index_dir,
         total_count=len(entity_entries),
     )
-    _append_index_section(lines, "Recent Query Pages", query_entries, limit=10)
+    _append_index_section(
+        lines,
+        "Recent Query Pages",
+        query_entries,
+        from_dir=index_dir,
+        limit=10,
+    )
     return "\n".join(lines)
 
 
@@ -708,13 +723,14 @@ def _source_hash_count(text: str) -> int:
     return len(re.findall(r"\bsource-hash\s*:", text, flags=re.IGNORECASE))
 
 
-def _append_page_section(lines: list[str], entries: list[PageEntry]) -> None:
+def _append_page_section(lines: list[str], entries: list[PageEntry], from_dir: Path) -> None:
     if not entries:
         lines.append("- _No pages yet._")
         lines.append("")
         return
     for entry in entries:
-        lines.append(f"- [{entry.title}]({entry.rel_path})")
+        link = _relative_link(from_dir, entry.path)
+        lines.append(f"- [{entry.title}]({link})")
     lines.append("")
 
 
@@ -723,6 +739,7 @@ def _append_index_section(
     title: str,
     entries: list[PageEntry],
     *,
+    from_dir: Path,
     limit: int | None = None,
     total_count: int | None = None,
 ) -> None:
@@ -737,13 +754,16 @@ def _append_index_section(
             "",
         ]
     )
-    _append_page_section(lines, display_entries)
+    _append_page_section(lines, display_entries, from_dir)
 
 
 def _append_recent_sync_section(
     lines: list[str],
     summary: object,
     pages: object,
+    *,
+    from_dir: Path,
+    wiki_root: Path,
 ) -> None:
     if not isinstance(summary, dict):
         return
@@ -768,7 +788,8 @@ def _append_recent_sync_section(
             rel_path = str(item.get("path") or "").strip()
             action = str(item.get("action") or "updated").strip()
             if rel_path:
-                lines.append(f"- {action}: [{name}]({rel_path})")
+                link = _relative_link(from_dir, wiki_root / rel_path)
+                lines.append(f"- {action}: [{name}]({link})")
             else:
                 lines.append(f"- {action}: {name}")
     lines.append("")

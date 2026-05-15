@@ -88,6 +88,57 @@ def test_refresh_index_writes_core_hub_pages_and_links_homepage(tmp_path):
     assert "Knowledge Map" in homepage
 
 
+def test_homepage_page_sections_link_relative_to_index(tmp_path):
+    cfg = default_config(tmp_path)
+    init_wiki(cfg)
+    (cfg.wiki.topics_dir / "alpha.md").write_text("# Alpha Topic\n", encoding="utf-8")
+    (cfg.wiki.entities_dir / "acme.md").write_text("# ACME Entity\n", encoding="utf-8")
+    (cfg.wiki.queries_dir / "20260507T000000Z-question.md").write_text(
+        "# Question Page\n",
+        encoding="utf-8",
+    )
+
+    refresh_index(cfg)
+    homepage = cfg.wiki.index_path.read_text(encoding="utf-8")
+
+    assert "- [Knowledge Map](hubs/knowledge-map.md)" in homepage
+    assert "- [Alpha Topic](topics/alpha.md)" in homepage
+    assert "- [ACME Entity](entities/acme.md)" in homepage
+    assert "- [Question Page](queries/20260507T000000Z-question.md)" in homepage
+    assert "(wiki/hubs/knowledge-map.md)" not in homepage
+    assert "(wiki/topics/alpha.md)" not in homepage
+    assert "(wiki/entities/acme.md)" not in homepage
+    assert "(wiki/queries/20260507T000000Z-question.md)" not in homepage
+
+
+def test_homepage_recent_sync_links_relative_to_index(tmp_path):
+    cfg = default_config(tmp_path)
+    init_wiki(cfg)
+    topic = cfg.wiki.topics_dir / "recent.md"
+    topic.write_text("# Recent Topic\n", encoding="utf-8")
+    record_recent_sync(
+        cfg,
+        status="completed",
+        processed_sources=1,
+        created_pages=0,
+        updated_pages=1,
+        pages=[
+            {
+                "name": "Recent Topic",
+                "kind": "topic",
+                "path": topic.relative_to(cfg.wiki.root_dir).as_posix(),
+                "action": "updated",
+            }
+        ],
+    )
+
+    refresh_index(cfg)
+    homepage = cfg.wiki.index_path.read_text(encoding="utf-8")
+
+    assert "- updated: [Recent Topic](topics/recent.md)" in homepage
+    assert "(wiki/topics/recent.md)" not in homepage
+
+
 def test_refresh_index_writes_topic_and_entity_catalog_pages(tmp_path):
     cfg = default_config(tmp_path)
     init_wiki(cfg)
