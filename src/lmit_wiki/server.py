@@ -29,6 +29,7 @@ from lmit_wiki.runtime import (
 )
 from lmit_wiki.search import search_result_payload, search_wiki
 from lmit_wiki.sessions import (
+    archive_query_session,
     compact_query_session,
     create_query_session,
     list_query_sessions,
@@ -46,6 +47,7 @@ class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
 class SyncJobState:
     job_id: str
     requested_limit: int | None
+    force: bool = False
     status: str = "queued"
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     started_at: str | None = None
@@ -67,6 +69,7 @@ class SyncJobState:
         return {
             "job_id": self.job_id,
             "requested_limit": self.requested_limit,
+            "force": self.force,
             "status": self.status,
             "created_at": self.created_at,
             "started_at": self.started_at,
@@ -98,6 +101,7 @@ class SyncJobManager:
         cfg: AppConfig,
         *,
         limit: int | None = None,
+        force: bool = False,
         resume: bool = False,
     ) -> tuple[dict[str, object], bool]:
         with self._lock:
@@ -108,13 +112,18 @@ class SyncJobManager:
             job = SyncJobState(
                 job_id=uuid4().hex[:12],
                 requested_limit=limit,
-                message="Resuming sync job..." if resume else "Queued.",
+                force=force,
+                message=(
+                    "Resuming sync job..."
+                    if resume
+                    else ("Force sync queued." if force else "Queued.")
+                ),
             )
             self._jobs[job.job_id] = job
             self._latest_job_id = job.job_id
             self._active_job_id = job.job_id
         clear_sync_stop_request(cfg)
-        Thread(target=self._run_job, args=(job.job_id, cfg, limit), daemon=True).start()
+        Thread(target=self._run_job, args=(job.job_id, cfg, limit, force), daemon=True).start()
         return job.payload(), True
 
     def resume_job(self, cfg: AppConfig, *, limit: int | None = None) -> tuple[dict[str, object], bool]:
@@ -149,7 +158,7 @@ class SyncJobManager:
         request_sync_stop(cfg)
         return payload, True
 
-    def _run_job(self, job_id: str, cfg: AppConfig, limit: int | None) -> None:
+    def _run_job(self, job_id: str, cfg: AppConfig, limit: int | None, force: bool) -> None:
         self._update_job(
             job_id,
             status="running",
@@ -174,6 +183,7 @@ class SyncJobManager:
             result = auto_sync_wiki(
                 cfg,
                 limit=limit,
+                force=force,
                 progress=report_progress,
                 should_stop=lambda: self._job_should_stop(job_id),
             )
@@ -441,6 +451,9 @@ class WikiWebApp:
                 if action == "compact":
                     session = compact_query_session(self._current_cfg(), session_id)
                     return self._json(start_response, {"session": session_payload(session)})
+                if action == "archive":
+                    session = archive_query_session(self._current_cfg(), session_id)
+                    return self._json(start_response, {"session": session_payload(session)})
                 if action and action.startswith("turns/") and action.endswith("/save"):
                     turn_index = int(action.split("/")[1])
                     session, saved_path = save_query_session_turn(
@@ -502,7 +515,12 @@ class WikiWebApp:
                 payload = self._read_json(environ)
                 raw_limit = payload.get("limit")
                 limit = int(raw_limit) if raw_limit not in (None, "") else None
-                job, started = self._sync_jobs.start_job(self._current_cfg(), limit=limit)
+                force = bool(payload.get("force", False))
+                job, started = self._sync_jobs.start_job(
+                    self._current_cfg(),
+                    limit=limit,
+                    force=force,
+                )
                 return self._json(
                     start_response,
                     {
@@ -1218,7 +1236,8 @@ INDEX_HTML = """<!doctype html>
           <h2>Auto Sync</h2>
           <div class="toolbar">
             <input id="syncLimit" placeholder="Optional source limit">
-            <button id="syncButton" class="warm" onclick="runSync()">Sync Now</button>
+            <button id="syncButton" onclick="runSync()">Sync Now</button>
+            <button id="forceSyncButton" class="warm" onclick="runSync(true)">Force Sync</button>
             <button id="syncStopButton" class="secondary" onclick="stopSync()">Stop Sync</button>
             <button id="syncResumeButton" class="secondary" onclick="resumeSync()">Resume Sync</button>
           </div>
@@ -1866,19 +1885,21 @@ INDEX_HTML = """<!doctype html>
       try {
         const data = await requestJson("/api/query/sessions", {}, 10);
         const sessions = data.sessions || [];
-        renderQuerySessions(sessions);
         const remembered = window.localStorage.getItem(CURRENT_QUERY_SESSION_KEY);
-        const preferred = sessions.find((item) => item.session_id === currentQuerySessionId)
-          || sessions.find((item) => item.session_id === remembered)
-          || sessions[0];
+        const activeId = currentQuerySessionId || remembered || "";
+        const preferred = sessions.find((item) => item.session_id === activeId);
         if (preferred) {
           currentQuerySessionId = preferred.session_id;
           renderCurrentQuerySession(preferred);
           window.localStorage.setItem(CURRENT_QUERY_SESSION_KEY, currentQuerySessionId);
         } else {
           currentQuerySessionId = null;
+          if (activeId) {
+            window.localStorage.removeItem(CURRENT_QUERY_SESSION_KEY);
+          }
           renderCurrentQuerySession(null);
         }
+        renderQuerySessions(sessions);
       } catch (error) {
         status("queryStatus", `Session load failed: ${error.message}`);
       }
@@ -1887,14 +1908,17 @@ INDEX_HTML = """<!doctype html>
     function renderQuerySessions(sessions) {
       const root = document.getElementById("querySessions");
       root.innerHTML = "";
-      if (!sessions.length) {
+      const visibleSessions = sessions.filter((session) =>
+        session.session_id !== currentQuerySessionId && (session.turn_count || 0) > 0
+      );
+      if (!visibleSessions.length) {
         const empty = document.createElement("div");
         empty.className = "empty-state";
         empty.textContent = "No recent sessions yet.";
         root.appendChild(empty);
         return;
       }
-      for (const session of sessions) {
+      for (const session of visibleSessions) {
         const item = document.createElement("div");
         item.className = "result";
         item.innerHTML = `
@@ -1902,6 +1926,7 @@ INDEX_HTML = """<!doctype html>
           <div class="meta">${escapeHtml(session.updated_at_utc || "")} / ${session.turn_count || 0} turn(s)</div>
           <div class="toolbar">
             <button class="secondary" onclick="openQuerySession('${escapeAttribute(session.session_id)}')">Open</button>
+            <button class="secondary" onclick="archiveQuerySession('${escapeAttribute(session.session_id)}')">Archive</button>
           </div>
         `;
         root.appendChild(item);
@@ -1912,24 +1937,23 @@ INDEX_HTML = """<!doctype html>
       const title = document.getElementById("currentQuerySessionTitle");
       const meta = document.getElementById("currentQuerySessionMeta");
       if (!session) {
-        title.textContent = "No Session Selected";
-        meta.textContent = "Ask a question to create a session, or open a recent session.";
+        title.textContent = "New Session";
+        meta.textContent = "Ask your first question to name and create this session.";
         return;
       }
       title.textContent = session.title || "Ask The Wiki Session";
       meta.textContent = `${session.turn_count || 0} turn(s) / ${session.updated_at_utc || ""}`;
     }
 
-    async function ensureCurrentQuerySession() {
+    async function ensureCurrentQuerySession(question) {
       if (currentQuerySessionId) {
         return { session_id: currentQuerySessionId };
       }
-      return await newQuerySession({ quiet: true });
+      return await createCurrentQuerySession(question);
     }
 
-    async function newQuerySession(options = {}) {
-      const question = document.getElementById("questionInput").value.trim();
-      const title = question ? question.slice(0, 80) : "Ask The Wiki Session";
+    async function createCurrentQuerySession(titleText) {
+      const title = String(titleText || "Ask The Wiki Session").trim().slice(0, 80) || "Ask The Wiki Session";
       const data = await requestJson("/api/query/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1939,11 +1963,20 @@ INDEX_HTML = """<!doctype html>
       window.localStorage.setItem(CURRENT_QUERY_SESSION_KEY, currentQuerySessionId);
       renderCurrentQuerySession(data.session);
       await loadQuerySessions();
+      return data.session;
+    }
+
+    async function newQuerySession(options = {}) {
+      currentQuerySessionId = null;
+      window.localStorage.removeItem(CURRENT_QUERY_SESSION_KEY);
+      document.getElementById("questionInput").value = "";
+      document.getElementById("queryOutput").innerHTML = "";
+      renderCurrentQuerySession(null);
+      await loadQuerySessions();
       if (!options.quiet) {
-        renderSessionDetail(data.session);
         status("queryStatus", "New session ready.");
       }
-      return data.session;
+      return null;
     }
 
     async function openQuerySession(sessionId) {
@@ -1952,7 +1985,29 @@ INDEX_HTML = """<!doctype html>
       window.localStorage.setItem(CURRENT_QUERY_SESSION_KEY, currentQuerySessionId);
       renderCurrentQuerySession(data.session);
       renderSessionDetail(data.session);
+      await loadQuerySessions();
       status("queryStatus", "Session loaded.");
+    }
+
+    async function archiveQuerySession(sessionId) {
+      try {
+        status("queryStatus", "Archiving session...");
+        const data = await requestJson(`/api/query/sessions/${encodeURIComponent(sessionId)}/archive`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}"
+        }, 10);
+        if (data.session && data.session.session_id === currentQuerySessionId) {
+          currentQuerySessionId = null;
+          window.localStorage.removeItem(CURRENT_QUERY_SESSION_KEY);
+          renderCurrentQuerySession(null);
+          document.getElementById("queryOutput").innerHTML = "";
+        }
+        await loadQuerySessions();
+        status("queryStatus", "Session archived.");
+      } catch (error) {
+        status("queryStatus", `Archive failed: ${error.message}`);
+      }
     }
 
     async function compactCurrentQuerySession() {
@@ -2047,7 +2102,7 @@ INDEX_HTML = """<!doctype html>
 
       let response;
       try {
-        const session = await ensureCurrentQuerySession();
+        const session = await ensureCurrentQuerySession(question);
         response = await fetch("/api/query/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2241,11 +2296,14 @@ INDEX_HTML = """<!doctype html>
       status("lintStatus", data.passed ? "Lint passed." : `${(data.warnings || []).length} warning(s).`);
     }
 
-    async function runSync() {
+    async function runSync(force = false) {
       try {
-        status("syncStatus", "Starting sync...");
+        status("syncStatus", force ? "Starting force sync..." : "Starting sync...");
         const raw = document.getElementById("syncLimit").value.trim();
         const payload = raw ? { limit: Number(raw) } : {};
+        if (force) {
+          payload.force = true;
+        }
         const data = await requestJson("/api/sync", {
           method: "POST",
           headers: { "Content-Type": "application/json" },

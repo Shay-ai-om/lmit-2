@@ -5,6 +5,7 @@ from lmit_wiki.query import QueryAnswer
 from lmit_wiki.search import search_wiki
 from lmit_wiki.sessions import (
     append_query_session_turn,
+    archive_query_session,
     compact_query_session,
     create_query_session,
     list_query_sessions,
@@ -44,6 +45,36 @@ def test_query_session_persists_json_and_markdown_transcript(tmp_path):
     assert "## Turn 1" in transcript
     assert "The homepage links were fixed. [S1]" in transcript
     assert any(item.kind == "session" for item in search_wiki(cfg, "homepage links", include_raw=False))
+
+
+def test_archive_query_session_hides_from_recent_list_and_persists_flag(tmp_path):
+    cfg = default_config(tmp_path)
+    session = create_query_session(cfg, title="Old research")
+    append_query_session_turn(
+        cfg,
+        session.session_id,
+        QueryAnswer(
+            question="Old question?",
+            title="Old answer",
+            answer_markdown="Old answer body.",
+            follow_up_questions=(),
+            search_results=(),
+            completion=None,
+            saved_path=None,
+        ),
+    )
+
+    archived = archive_query_session(cfg, session.session_id)
+    loaded = load_query_session(cfg, session.session_id)
+    disk_payload = archived.json_path.read_text(encoding="utf-8")
+    transcript = archived.markdown_path.read_text(encoding="utf-8")
+
+    assert archived.archived_at_utc
+    assert loaded.archived_at_utc == archived.archived_at_utc
+    assert "archived_at_utc" in disk_payload
+    assert "archived_at_utc" in transcript
+    assert list_query_sessions(cfg) == []
+    assert list_query_sessions(cfg, include_archived=True)[0].session_id == session.session_id
 
 
 def test_compact_query_session_preserves_recent_turns_and_summary(tmp_path, monkeypatch):

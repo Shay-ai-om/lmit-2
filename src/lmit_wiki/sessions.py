@@ -39,6 +39,7 @@ class QuerySession:
     turns: tuple[QuerySessionTurn, ...]
     json_path: Path
     markdown_path: Path
+    archived_at_utc: str = ""
 
 
 def create_query_session(cfg: AppConfig, *, title: str | None = None) -> QuerySession:
@@ -56,12 +57,18 @@ def create_query_session(cfg: AppConfig, *, title: str | None = None) -> QuerySe
         turns=(),
         json_path=_json_path(cfg, session_id),
         markdown_path=_markdown_path(cfg, session_id),
+        archived_at_utc="",
     )
     _write_session(cfg, session)
     return session
 
 
-def list_query_sessions(cfg: AppConfig, *, limit: int = 20) -> list[QuerySession]:
+def list_query_sessions(
+    cfg: AppConfig,
+    *,
+    limit: int = 20,
+    include_archived: bool = False,
+) -> list[QuerySession]:
     sessions_dir = _sessions_dir(cfg)
     if not sessions_dir.exists():
         return []
@@ -70,6 +77,8 @@ def list_query_sessions(cfg: AppConfig, *, limit: int = 20) -> list[QuerySession
         for path in sessions_dir.glob("*.json")
         if not path.name.startswith("_")
     ]
+    if not include_archived:
+        sessions = [session for session in sessions if not session.archived_at_utc]
     return sorted(sessions, key=lambda item: item.updated_at_utc, reverse=True)[:limit]
 
 
@@ -89,6 +98,7 @@ def load_query_session(cfg: AppConfig, session_id: str) -> QuerySession:
         turns=turns,
         json_path=path,
         markdown_path=_markdown_path(cfg, cleaned),
+        archived_at_utc=str(payload.get("archived_at_utc") or ""),
     )
 
 
@@ -132,6 +142,25 @@ def append_query_session_turn(
         turns=(*session.turns, turn),
         json_path=session.json_path,
         markdown_path=session.markdown_path,
+        archived_at_utc=session.archived_at_utc,
+    )
+    _write_session(cfg, updated)
+    return updated
+
+
+def archive_query_session(cfg: AppConfig, session_id: str) -> QuerySession:
+    session = load_query_session(cfg, session_id)
+    now = _utc_now()
+    updated = QuerySession(
+        session_id=session.session_id,
+        title=session.title,
+        created_at_utc=session.created_at_utc,
+        updated_at_utc=now,
+        compact_summary=session.compact_summary,
+        turns=session.turns,
+        json_path=session.json_path,
+        markdown_path=session.markdown_path,
+        archived_at_utc=session.archived_at_utc or now,
     )
     _write_session(cfg, updated)
     return updated
@@ -165,6 +194,7 @@ def compact_query_session(
         turns=tuple(recent_turns),
         json_path=session.json_path,
         markdown_path=session.markdown_path,
+        archived_at_utc=session.archived_at_utc,
     )
     _write_session(cfg, updated)
     return updated
@@ -216,6 +246,7 @@ def save_query_session_turn(
         turns=tuple(turns),
         json_path=session.json_path,
         markdown_path=session.markdown_path,
+        archived_at_utc=session.archived_at_utc,
     )
     _write_session(cfg, updated)
     return updated, saved_path
@@ -243,6 +274,7 @@ def session_payload(session: QuerySession, *, include_turns: bool = True) -> dic
         "created_at_utc": session.created_at_utc,
         "updated_at_utc": session.updated_at_utc,
         "compact_summary": session.compact_summary,
+        "archived_at_utc": session.archived_at_utc,
         "turn_count": len(session.turns),
         "markdown_path": str(session.markdown_path),
     }
@@ -267,6 +299,7 @@ def _session_payload_for_disk(session: QuerySession) -> dict[str, Any]:
         "created_at_utc": session.created_at_utc,
         "updated_at_utc": session.updated_at_utc,
         "compact_summary": session.compact_summary,
+        "archived_at_utc": session.archived_at_utc,
         "turns": [_turn_payload(turn) for turn in session.turns],
     }
 
@@ -311,6 +344,7 @@ def _render_markdown(session: QuerySession) -> str:
         f"session_id: {json.dumps(session.session_id)}",
         f"created_at_utc: {session.created_at_utc}",
         f"updated_at_utc: {session.updated_at_utc}",
+        f"archived_at_utc: {session.archived_at_utc}",
         "---",
         "",
         f"# {session.title}",

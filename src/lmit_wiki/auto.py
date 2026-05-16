@@ -3,6 +3,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 import json
 import os
@@ -18,6 +19,7 @@ from lmit_wiki.text import portable_markdown_filename, strip_frontmatter
 
 MAX_TOPIC_UPDATES_PER_SOURCE = 2
 MAX_ENTITY_UPDATES_PER_SOURCE = 3
+SYNC_SOURCE_SIGNATURE_VERSION = 2
 GENERIC_PAGE_NAMES = {
     "article",
     "document",
@@ -66,6 +68,7 @@ def auto_sync_wiki(
     cfg: AppConfig,
     *,
     limit: int | None = None,
+    force: bool = False,
     progress: Callable[[dict[str, object]], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> AutoSyncResult:
@@ -81,7 +84,9 @@ def auto_sync_wiki(
     pending = [
         record
         for record in manifest.get("sources", [])
-        if state["processed_sources"].get(str(record["relative_path"])) != str(record.get("content_hash", ""))
+        if force
+        or state["processed_sources"].get(str(record["relative_path"]))
+        != _sync_source_signature(record)
     ]
     if limit is not None:
         pending = pending[:limit]
@@ -129,7 +134,7 @@ def auto_sync_wiki(
                     synced = _upsert_page(cfg, record, kind, item)
                     pages.append(synced)
                     catalog[kind].append(item["name"])
-            state["processed_sources"][str(record["relative_path"])] = str(record.get("content_hash", ""))
+            state["processed_sources"][str(record["relative_path"])] = _sync_source_signature(record)
             _clear_failed_source(state, record)
         except LLMInvocationError as exc:
             failed = _record_failed_source(state, record, exc)
@@ -575,6 +580,7 @@ def _record_failed_source(
     )
     failed_sources[relative_path] = {
         "content_hash": str(record.get("content_hash", "")),
+        "sync_signature": _sync_source_signature(record),
         "title": failed.title,
         "relative_path": failed.relative_path,
         "error": failed.error,
@@ -598,6 +604,30 @@ def _load_state(cfg: AppConfig) -> dict[str, object]:
 
 def _save_state(cfg: AppConfig, state: dict[str, object]) -> None:
     save_wiki_state(cfg, state)
+
+
+def _sync_source_signature(record: dict[str, object]) -> str:
+    source_note_text = _record_path_text(record.get("source_note_path"))
+    return sha256(
+        "\n".join(
+            [
+                f"v{SYNC_SOURCE_SIGNATURE_VERSION}",
+                str(record.get("content_hash", "")),
+                str(record.get("storage_key", "")),
+                str(record.get("excerpt", "")),
+                source_note_text,
+            ]
+        ).encode("utf-8", errors="ignore")
+    ).hexdigest()
+
+
+def _record_path_text(path_value: object) -> str:
+    if not path_value:
+        return ""
+    path = Path(str(path_value))
+    if not path.exists() or not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8", errors="ignore")
 
 
 def _stop_requested(cfg: AppConfig, should_stop: Callable[[], bool] | None) -> bool:

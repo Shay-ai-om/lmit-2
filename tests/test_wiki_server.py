@@ -309,11 +309,20 @@ def test_web_ui_exposes_query_session_controls():
     assert 'onclick="saveSessionTurn(' in INDEX_HTML
     assert "/api/query/sessions" in INDEX_HTML
     assert "currentQuerySessionId" in INDEX_HTML
+    assert "async function createCurrentQuerySession(titleText)" in INDEX_HTML
+    assert "return await createCurrentQuerySession(question);" in INDEX_HTML
+    assert 'document.getElementById("questionInput").value = "";' in INDEX_HTML
+    assert "window.localStorage.removeItem(CURRENT_QUERY_SESSION_KEY);" in INDEX_HTML
+    assert "session.session_id !== currentQuerySessionId && (session.turn_count || 0) > 0" in INDEX_HTML
+    assert "Archive</button>" in INDEX_HTML
+    assert "async function archiveQuerySession(sessionId)" in INDEX_HTML
+    assert "/archive" in INDEX_HTML
     assert "@media (max-width: 760px)" in INDEX_HTML
 
 
-def test_web_ui_sync_now_uses_warm_action_style():
-    assert '<button id="syncButton" class="warm" onclick="runSync()">Sync Now</button>' in INDEX_HTML
+def test_web_ui_sync_now_uses_default_action_style():
+    assert '<button id="syncButton" onclick="runSync()">Sync Now</button>' in INDEX_HTML
+    assert '<button id="forceSyncButton" class="warm" onclick="runSync(true)">Force Sync</button>' in INDEX_HTML
 
 
 def test_document_route_serves_wiki_markdown_and_blocks_missing_paths(tmp_path):
@@ -351,9 +360,10 @@ def test_web_ui_sync_runs_as_background_job(tmp_path, monkeypatch):
     started = Event()
     release = Event()
 
-    def fake_sync(cfg_arg, *, limit=None, progress=None, should_stop=None):
+    def fake_sync(cfg_arg, *, limit=None, force=False, progress=None, should_stop=None):
         assert cfg_arg == cfg
         assert limit == 2
+        assert force is False
         if progress is not None:
             progress(
                 {
@@ -429,14 +439,50 @@ def test_web_ui_sync_runs_as_background_job(tmp_path, monkeypatch):
     assert completed_payload["job"]["pages"][0]["name"] == "Alpha Topic"
 
 
+def test_web_ui_force_sync_starts_forced_background_job(tmp_path, monkeypatch):
+    cfg = default_config(tmp_path)
+    app = WikiWebApp(cfg)
+    seen: dict[str, object] = {}
+
+    def fake_sync(cfg_arg, *, limit=None, force=False, progress=None, should_stop=None):
+        seen["cfg"] = cfg_arg
+        seen["limit"] = limit
+        seen["force"] = force
+        if progress is not None:
+            progress(
+                {
+                    "message": "Force syncing 1 source.",
+                    "total_sources": 1,
+                    "processed_sources": 0,
+                    "created_pages": 0,
+                    "updated_pages": 0,
+                }
+            )
+        return AutoSyncResult(
+            processed_sources=1,
+            created_pages=0,
+            updated_pages=0,
+            pages=(),
+        )
+
+    monkeypatch.setattr("lmit_wiki.server.auto_sync_wiki", fake_sync)
+
+    payload = _call_json(app, "POST", "/api/sync", {"limit": 1, "force": True})
+
+    assert payload["started"] is True
+    assert payload["job"]["force"] is True
+    assert seen == {"cfg": cfg, "limit": 1, "force": True}
+
+
 def test_web_ui_sync_can_stop_and_resume_background_job(tmp_path, monkeypatch):
     cfg = default_config(tmp_path)
     app = WikiWebApp(cfg)
     started = Event()
     calls = {"count": 0}
 
-    def fake_sync(cfg_arg, *, limit=None, progress=None, should_stop=None):
+    def fake_sync(cfg_arg, *, limit=None, force=False, progress=None, should_stop=None):
         assert cfg_arg == cfg
+        assert force is False
         calls["count"] += 1
         if calls["count"] == 1:
             if progress is not None:
@@ -629,6 +675,35 @@ def test_web_ui_exposes_query_session_endpoints(tmp_path):
     assert listing["sessions"][0]["session_id"] == session_id
     assert listing["sessions"][0]["title"] == "Session A"
     assert detail["session"]["turns"][0]["question"] == "first question"
+
+
+def test_web_ui_archives_query_session(tmp_path):
+    cfg = default_config(tmp_path)
+    app = WikiWebApp(cfg)
+
+    created = _call_json(app, "POST", "/api/query/sessions", {"title": "Archive me"})
+    session_id = created["session"]["session_id"]
+    append_query_session_turn(
+        cfg,
+        session_id,
+        QueryAnswer(
+            question="old question",
+            title="Old answer",
+            answer_markdown="old answer body",
+            follow_up_questions=(),
+            search_results=(),
+            completion=None,
+            saved_path=None,
+        ),
+    )
+
+    archived = _call_json(app, "POST", f"/api/query/sessions/{session_id}/archive")
+    listing = _call_json(app, "GET", "/api/query/sessions")
+    detail = _call_json(app, "GET", f"/api/query/sessions/{session_id}")
+
+    assert archived["session"]["archived_at_utc"]
+    assert listing["sessions"] == []
+    assert detail["session"]["archived_at_utc"] == archived["session"]["archived_at_utc"]
 
 
 def test_web_ui_compacts_query_session(tmp_path, monkeypatch):

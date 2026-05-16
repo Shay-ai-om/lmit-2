@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
-from lmit_wiki.auto import auto_sync_wiki, _curate_extracted_updates
+from lmit_wiki.auto import auto_sync_wiki, _curate_extracted_updates, _sync_source_signature
 from lmit_wiki.builder import ingest_wiki
 from lmit_wiki.config import default_config
 from lmit_wiki.runtime import LLMInvocationError
@@ -36,7 +37,7 @@ def test_auto_sync_saves_completed_progress_before_later_failure(tmp_path, monke
 
     state = json.loads(cfg.wiki_runtime.state_path.read_text(encoding="utf-8"))
     assert state["processed_sources"] == {
-        first_record["relative_path"]: first_record["content_hash"]
+        first_record["relative_path"]: _sync_source_signature(first_record)
     }
 
 
@@ -71,6 +72,67 @@ def test_auto_sync_resume_skips_sources_already_saved_in_state(tmp_path, monkeyp
 
     assert result.processed_sources == 1
     assert resumed_calls == ["Beta"]
+
+
+def test_auto_sync_reruns_when_source_note_signature_changes(tmp_path, monkeypatch):
+    cfg = default_config(tmp_path)
+    raw_dir = cfg.wiki_ingest.source_dirs[0]
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / "alpha.md").write_text("# Alpha\n\none", encoding="utf-8")
+    ingest_wiki(cfg)
+
+    calls: list[str] = []
+
+    def fake_extract(cfg_arg, record, catalog):
+        calls.append(str(record["title"]))
+        return {"topics": [], "entities": []}
+
+    monkeypatch.setattr("lmit_wiki.auto._extract_source_updates", fake_extract)
+    first = auto_sync_wiki(cfg)
+    assert first.processed_sources == 1
+    assert calls == ["Alpha"]
+
+    calls.clear()
+    second = auto_sync_wiki(cfg)
+    assert second.processed_sources == 0
+    assert calls == []
+
+    manifest = json.loads((cfg.wiki.root_dir / "manifest.json").read_text(encoding="utf-8"))
+    note_path = Path(manifest["sources"][0]["source_note_path"])
+    note_path.write_text(
+        note_path.read_text(encoding="utf-8") + "\n\nNew generated source-note context.",
+        encoding="utf-8",
+    )
+
+    third = auto_sync_wiki(cfg)
+    assert third.processed_sources == 1
+    assert calls == ["Alpha"]
+
+
+def test_auto_sync_force_processes_saved_sources(tmp_path, monkeypatch):
+    cfg = default_config(tmp_path)
+    raw_dir = cfg.wiki_ingest.source_dirs[0]
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / "alpha.md").write_text("# Alpha\n\none", encoding="utf-8")
+    ingest_wiki(cfg)
+
+    calls: list[str] = []
+
+    def fake_extract(cfg_arg, record, catalog):
+        calls.append(str(record["title"]))
+        return {"topics": [], "entities": []}
+
+    monkeypatch.setattr("lmit_wiki.auto._extract_source_updates", fake_extract)
+    first = auto_sync_wiki(cfg)
+    assert first.processed_sources == 1
+    calls.clear()
+
+    normal = auto_sync_wiki(cfg)
+    forced = auto_sync_wiki(cfg, force=True)
+
+    assert normal.processed_sources == 0
+    assert forced.processed_sources == 1
+    assert calls == ["Alpha"]
 
 
 def test_auto_sync_records_llm_failures_and_continues_sources(tmp_path, monkeypatch):
@@ -115,8 +177,9 @@ def test_auto_sync_records_llm_failures_and_continues_sources(tmp_path, monkeypa
     assert failed["title"] == "Alpha"
     assert failed["relative_path"] == alpha_record["relative_path"]
     assert failed["error"] == "provider timed out"
+    assert failed["sync_signature"] == _sync_source_signature(alpha_record)
     assert state["processed_sources"] == {
-        beta_record["relative_path"]: beta_record["content_hash"]
+        beta_record["relative_path"]: _sync_source_signature(beta_record)
     }
 
 
