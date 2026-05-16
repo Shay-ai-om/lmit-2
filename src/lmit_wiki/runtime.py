@@ -35,6 +35,12 @@ class LLMInvocationError(RuntimeError):
 
 DEFAULT_REMOTE_TIMEOUT_SECONDS = 120
 DEFAULT_LOCAL_TIMEOUT_SECONDS = 300
+DEFAULT_SEARCH_LIMIT = 8
+DEFAULT_QUERY_CONTEXT_CHAR_LIMIT = 2400
+MIN_SEARCH_LIMIT = 1
+MAX_SEARCH_LIMIT = 50
+MIN_QUERY_CONTEXT_CHAR_LIMIT = 200
+MAX_QUERY_CONTEXT_CHAR_LIMIT = 20000
 DEFAULT_LOCAL_PROFILE_IDS = {
     "ollama-local",
     "lm-studio-local",
@@ -62,6 +68,8 @@ class WikiRuntimeSettings:
     active_profile_id: str | None
     fallback_order: tuple[str, ...]
     profiles: tuple[LLMProfile, ...]
+    search_limit: int = DEFAULT_SEARCH_LIMIT
+    query_context_char_limit: int = DEFAULT_QUERY_CONTEXT_CHAR_LIMIT
 
     def ordered_profiles(self) -> list[LLMProfile]:
         by_id = {profile.profile_id: profile for profile in self.profiles if profile.enabled}
@@ -96,6 +104,8 @@ class LLMCompletion:
 def default_runtime_settings_payload() -> dict[str, Any]:
     return {
         "version": 1,
+        "search_limit": DEFAULT_SEARCH_LIMIT,
+        "query_context_char_limit": DEFAULT_QUERY_CONTEXT_CHAR_LIMIT,
         "active_profile": "ollama-local",
         "fallback_order": [
             "ollama-local",
@@ -188,6 +198,8 @@ def save_runtime_settings(
     settings = _settings_from_payload(payload)
     serialized = {
         "version": 1,
+        "search_limit": settings.search_limit,
+        "query_context_char_limit": settings.query_context_char_limit,
         "active_profile": settings.active_profile_id,
         "fallback_order": list(settings.fallback_order),
         "profiles": [
@@ -215,6 +227,8 @@ def save_runtime_settings(
 
 def runtime_settings_public_payload(settings: WikiRuntimeSettings) -> dict[str, Any]:
     return {
+        "search_limit": settings.search_limit,
+        "query_context_char_limit": settings.query_context_char_limit,
         "active_profile": settings.active_profile_id,
         "fallback_order": list(settings.fallback_order),
         "profiles": [
@@ -267,10 +281,29 @@ def merge_runtime_settings_payload(
 
     return {
         "version": 1,
+        "search_limit": incoming.get("search_limit", existing.search_limit),
+        "query_context_char_limit": incoming.get(
+            "query_context_char_limit",
+            existing.query_context_char_limit,
+        ),
         "active_profile": incoming.get("active_profile"),
         "fallback_order": incoming.get("fallback_order", []),
         "profiles": merged_profiles,
     }
+
+
+def effective_search_limit(cfg: AppConfig) -> int:
+    try:
+        return load_runtime_settings(cfg).search_limit
+    except Exception:
+        return cfg.wiki_runtime.search_limit
+
+
+def effective_query_context_char_limit(cfg: AppConfig) -> int:
+    try:
+        return load_runtime_settings(cfg).query_context_char_limit
+    except Exception:
+        return DEFAULT_QUERY_CONTEXT_CHAR_LIMIT
 
 
 def invoke_text_completion(
@@ -401,6 +434,20 @@ def _settings_from_payload(payload: dict[str, Any]) -> WikiRuntimeSettings:
         active_profile_id=active_profile_id,
         fallback_order=fallback_order,
         profiles=tuple(profiles),
+        search_limit=_bounded_int(
+            payload.get("search_limit"),
+            default=DEFAULT_SEARCH_LIMIT,
+            minimum=MIN_SEARCH_LIMIT,
+            maximum=MAX_SEARCH_LIMIT,
+            field_name="search_limit",
+        ),
+        query_context_char_limit=_bounded_int(
+            payload.get("query_context_char_limit"),
+            default=DEFAULT_QUERY_CONTEXT_CHAR_LIMIT,
+            minimum=MIN_QUERY_CONTEXT_CHAR_LIMIT,
+            maximum=MAX_QUERY_CONTEXT_CHAR_LIMIT,
+            field_name="query_context_char_limit",
+        ),
     )
 
 
@@ -1003,6 +1050,25 @@ def _normalized_timeout_seconds(
     ):
         return DEFAULT_LOCAL_TIMEOUT_SECONDS
     return timeout
+
+
+def _bounded_int(
+    raw_value: object,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+    field_name: str,
+) -> int:
+    if raw_value in (None, ""):
+        return default
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeSettingsError(f"{field_name} must be an integer") from exc
+    if value < minimum or value > maximum:
+        raise RuntimeSettingsError(f"{field_name} must be between {minimum} and {maximum}")
+    return value
 
 
 def _default_timeout_seconds(provider: str, base_url: str) -> int:

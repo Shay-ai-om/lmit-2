@@ -28,6 +28,9 @@ class PageEntry:
     text: str
 
 
+SOURCE_NOTE_EXCERPT_CHARS = 6000
+
+
 def init_wiki(cfg: AppConfig) -> None:
     for path in [
         cfg.wiki.root_dir,
@@ -35,6 +38,7 @@ def init_wiki(cfg: AppConfig) -> None:
         cfg.wiki.sources_dir,
         _system_dir(cfg),
         _hubs_dir(cfg),
+        cfg.wiki.root_dir / "wiki" / "sessions",
         cfg.wiki.topics_dir,
         cfg.wiki.entities_dir,
         cfg.wiki.queries_dir,
@@ -114,7 +118,7 @@ def ingest_wiki(
                 content_hash=content_hash,
                 size=len(text.encode("utf-8")),
                 urls=extract_urls(text),
-                excerpt=excerpt(text),
+                excerpt=excerpt(text, max_chars=SOURCE_NOTE_EXCERPT_CHARS),
                 source_id=source_id,
                 storage_key=storage_key,
             )

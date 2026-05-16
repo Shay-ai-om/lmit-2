@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 
 from lmit_wiki.config import AppConfig
+from lmit_wiki.runtime import effective_search_limit
 from lmit_wiki.text import excerpt, first_heading, strip_frontmatter
 
 
@@ -36,6 +37,7 @@ def load_wiki_documents(cfg: AppConfig, *, include_raw: bool = True) -> list[Wik
     docs.extend(_load_dir(cfg.wiki.sources_dir, cfg.wiki.root_dir, "source"))
     docs.extend(_load_dir(cfg.wiki.root_dir / "wiki" / "system", cfg.wiki.root_dir, "system"))
     docs.extend(_load_dir(cfg.wiki.root_dir / "wiki" / "hubs", cfg.wiki.root_dir, "hub"))
+    docs.extend(_load_dir(cfg.wiki.root_dir / "wiki" / "sessions", cfg.wiki.root_dir, "session"))
     docs.extend(_load_dir(cfg.wiki.topics_dir, cfg.wiki.root_dir, "topic"))
     docs.extend(_load_dir(cfg.wiki.entities_dir, cfg.wiki.root_dir, "entity"))
     docs.extend(_load_dir(cfg.wiki.queries_dir, cfg.wiki.root_dir, "query"))
@@ -87,7 +89,7 @@ def search_wiki(
                 snippet=_snippet(doc.body, cleaned_query, units),
             )
         )
-    limit = limit or max(1, cfg.wiki_runtime.search_limit)
+    limit = limit or max(1, effective_search_limit(cfg))
     return sorted(results, key=lambda item: (-item.score, item.rel_path.lower()))[:limit]
 
 

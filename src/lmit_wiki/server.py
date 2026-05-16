@@ -28,6 +28,14 @@ from lmit_wiki.runtime import (
     save_runtime_settings,
 )
 from lmit_wiki.search import search_result_payload, search_wiki
+from lmit_wiki.sessions import (
+    compact_query_session,
+    create_query_session,
+    list_query_sessions,
+    load_query_session,
+    save_query_session_turn,
+    session_payload,
+)
 
 
 class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
@@ -409,15 +417,57 @@ class WikiWebApp:
                     for item in search_wiki(self._current_cfg(), query, include_raw=True)
                 ]
                 return self._json(start_response, {"results": results})
+            if method == "GET" and path == "/api/query/sessions":
+                sessions = [
+                    session_payload(session, include_turns=False)
+                    for session in list_query_sessions(self._current_cfg())
+                ]
+                return self._json(start_response, {"sessions": sessions})
+            if method == "POST" and path == "/api/query/sessions":
+                payload = self._read_json(environ)
+                session = create_query_session(
+                    self._current_cfg(),
+                    title=str(payload.get("title", "")).strip() or None,
+                )
+                return self._json(start_response, {"session": session_payload(session)})
+            if method == "GET" and path.startswith("/api/query/sessions/"):
+                session_id, action = _query_session_route(path)
+                if action:
+                    raise ValueError(f"Unsupported query session action: {action}")
+                session = load_query_session(self._current_cfg(), session_id)
+                return self._json(start_response, {"session": session_payload(session)})
+            if method == "POST" and path.startswith("/api/query/sessions/"):
+                session_id, action = _query_session_route(path)
+                if action == "compact":
+                    session = compact_query_session(self._current_cfg(), session_id)
+                    return self._json(start_response, {"session": session_payload(session)})
+                if action and action.startswith("turns/") and action.endswith("/save"):
+                    turn_index = int(action.split("/")[1])
+                    session, saved_path = save_query_session_turn(
+                        self._current_cfg(),
+                        session_id,
+                        turn_index,
+                    )
+                    return self._json(
+                        start_response,
+                        {
+                            "session": session_payload(session),
+                            "saved_path": str(saved_path),
+                        },
+                    )
+                else:
+                    raise ValueError(f"Unsupported query session action: {action}")
             if method == "POST" and path == "/api/query/stream":
                 payload = self._read_json(environ)
                 question = str(payload.get("question", "")).strip()
                 if not question:
                     raise ValueError("Question is required.")
+                session_id = str(payload.get("session_id", "")).strip() or None
                 return self._stream_query(
                     start_response,
                     question=question,
                     save=bool(payload.get("save", True)),
+                    session_id=session_id,
                 )
             if method == "POST" and path == "/api/query":
                 payload = self._read_json(environ)
@@ -597,6 +647,7 @@ class WikiWebApp:
         *,
         question: str,
         save: bool,
+        session_id: str | None,
     ):
         queue: Queue[dict[str, object] | None] = Queue()
         cfg = self._current_cfg()
@@ -611,12 +662,14 @@ class WikiWebApp:
                     cfg,
                     question,
                     save=save,
+                    session_id=session_id,
                     on_chunk=lambda chunk: emit({"type": "chunk", "text": chunk}),
                 )
                 emit(
                     {
                         "type": "done",
                         "title": answer.title,
+                        "session_id": session_id,
                         "answer_markdown": answer.answer_markdown,
                         "follow_up_questions": list(answer.follow_up_questions),
                         "saved_path": str(answer.saved_path) if answer.saved_path else None,
@@ -717,6 +770,15 @@ def _query_search_result_payloads(cfg: AppConfig, answer: QueryAnswer) -> list[d
         payload["citation"] = f"S{index}"
         payloads.append(payload)
     return payloads
+
+
+def _query_session_route(path: str) -> tuple[str, str | None]:
+    suffix = path.removeprefix("/api/query/sessions/").strip("/")
+    parts = [part for part in suffix.split("/") if part]
+    if not parts:
+        raise ValueError("session_id is required")
+    action = "/".join(parts[1:]) if len(parts) > 1 else None
+    return parts[0], action
 
 
 def _raw_rel_path_for_result(cfg: AppConfig, result) -> str | None:
@@ -848,7 +910,7 @@ INDEX_HTML = """<!doctype html>
 
     .grid {
       display: grid;
-      grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);
+      grid-template-columns: minmax(0, 1fr) minmax(320px, 0.72fr);
       gap: 24px;
       align-items: start;
     }
@@ -1044,7 +1106,7 @@ INDEX_HTML = """<!doctype html>
       padding: 2px 5px;
     }
 
-    @media (max-width: 980px) {
+    @media (max-width: 760px) {
       .grid { grid-template-columns: 1fr; }
       .row { grid-template-columns: 1fr; }
       .hero { align-items: stretch; flex-direction: column; }
@@ -1104,10 +1166,22 @@ INDEX_HTML = """<!doctype html>
         <div>
           <h2>Ask The Wiki</h2>
           <div class="stack">
+            <div class="result">
+              <h3 id="currentQuerySessionTitle">No Session Selected</h3>
+              <div id="currentQuerySessionMeta" class="meta">Ask a question to create a session, or open a recent session.</div>
+              <div class="toolbar">
+                <button class="secondary" onclick="newQuerySession()">New Session</button>
+                <button class="secondary" onclick="compactCurrentQuerySession()">Compact</button>
+              </div>
+            </div>
             <textarea id="questionInput" placeholder="Ask a synthesis question. The answer will be grounded in the current wiki and can be filed back into wiki/queries."></textarea>
             <div class="toolbar">
               <button class="warm" onclick="runQuery(true)">Ask And Save</button>
               <button class="secondary" onclick="runQuery(false)">Ask Only</button>
+            </div>
+            <div>
+              <h3>Recent Sessions</h3>
+              <div id="querySessions" class="stack"></div>
             </div>
           </div>
         </div>
@@ -1144,7 +1218,7 @@ INDEX_HTML = """<!doctype html>
           <h2>Auto Sync</h2>
           <div class="toolbar">
             <input id="syncLimit" placeholder="Optional source limit">
-            <button id="syncButton" onclick="runSync()">Sync Now</button>
+            <button id="syncButton" class="warm" onclick="runSync()">Sync Now</button>
             <button id="syncStopButton" class="secondary" onclick="stopSync()">Stop Sync</button>
             <button id="syncResumeButton" class="secondary" onclick="resumeSync()">Resume Sync</button>
           </div>
@@ -1166,6 +1240,14 @@ INDEX_HTML = """<!doctype html>
           <label class="field">
             <span>Fallback Order</span>
             <input id="fallbackOrder" placeholder="ollama-local, lm-studio-rest, litellm-local, openai-compatible, gemini">
+          </label>
+          <label class="field">
+            <span>Search Result Limit</span>
+            <input id="searchLimit" type="number" min="1" max="50" step="1" placeholder="8">
+          </label>
+          <label class="field">
+            <span>Ask Context Capacity</span>
+            <input id="queryContextCharLimit" type="number" min="200" max="20000" step="100" placeholder="2400">
           </label>
         </div>
         <div class="toolbar">
@@ -1301,10 +1383,13 @@ INDEX_HTML = """<!doctype html>
 
     let currentSyncJobId = null;
     let syncPollTimer = null;
+    let currentQuerySessionId = null;
+    const CURRENT_QUERY_SESSION_KEY = "lmit2.currentQuerySessionId";
 
     async function boot() {
       await loadStatus();
       await loadSettings();
+      await loadQuerySessions();
       await loadSyncJob();
     }
 
@@ -1378,6 +1463,7 @@ INDEX_HTML = """<!doctype html>
           body: JSON.stringify(payload)
         }, 20);
         await loadStatus();
+        await loadQuerySessions();
         status("pathStatus", "Paths saved. This did not run Ingest or call an LLM.");
       } catch (error) {
         status("pathStatus", `Save failed: ${error.message}`);
@@ -1518,6 +1604,8 @@ INDEX_HTML = """<!doctype html>
         const data = await requestJson("/api/settings", {}, 10);
         document.getElementById("activeProfile").value = data.active_profile || "";
         document.getElementById("fallbackOrder").value = (data.fallback_order || []).join(", ");
+        document.getElementById("searchLimit").value = data.search_limit || 8;
+        document.getElementById("queryContextCharLimit").value = data.query_context_char_limit || 2400;
         renderProfiles(data.profiles || []);
         status("settingsStatus", "Settings loaded.");
       } catch (error) {
@@ -1536,6 +1624,8 @@ INDEX_HTML = """<!doctype html>
         }, 20);
         document.getElementById("activeProfile").value = data.active_profile || "";
         document.getElementById("fallbackOrder").value = (data.fallback_order || []).join(", ");
+        document.getElementById("searchLimit").value = data.search_limit || 8;
+        document.getElementById("queryContextCharLimit").value = data.query_context_char_limit || 2400;
         renderProfiles(data.profiles || []);
         status("settingsStatus", "Default profiles restored.");
       } catch (error) {
@@ -1563,6 +1653,8 @@ INDEX_HTML = """<!doctype html>
         const payload = {
           active_profile: document.getElementById("activeProfile").value.trim() || null,
           fallback_order: document.getElementById("fallbackOrder").value.split(",").map((item) => item.trim()).filter(Boolean),
+          search_limit: Number(document.getElementById("searchLimit").value || "8"),
+          query_context_char_limit: Number(document.getElementById("queryContextCharLimit").value || "2400"),
           profiles
         };
         const data = await requestJson("/api/settings", {
@@ -1570,6 +1662,8 @@ INDEX_HTML = """<!doctype html>
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
         }, 20);
+        document.getElementById("searchLimit").value = data.search_limit || 8;
+        document.getElementById("queryContextCharLimit").value = data.query_context_char_limit || 2400;
         renderProfiles(data.profiles || []);
         status("settingsStatus", "Settings saved. This did not call an LLM.");
       } catch (error) {
@@ -1768,6 +1862,170 @@ INDEX_HTML = """<!doctype html>
       status("searchStatus", "");
     }
 
+    async function loadQuerySessions() {
+      try {
+        const data = await requestJson("/api/query/sessions", {}, 10);
+        const sessions = data.sessions || [];
+        renderQuerySessions(sessions);
+        const remembered = window.localStorage.getItem(CURRENT_QUERY_SESSION_KEY);
+        const preferred = sessions.find((item) => item.session_id === currentQuerySessionId)
+          || sessions.find((item) => item.session_id === remembered)
+          || sessions[0];
+        if (preferred) {
+          currentQuerySessionId = preferred.session_id;
+          renderCurrentQuerySession(preferred);
+          window.localStorage.setItem(CURRENT_QUERY_SESSION_KEY, currentQuerySessionId);
+        } else {
+          currentQuerySessionId = null;
+          renderCurrentQuerySession(null);
+        }
+      } catch (error) {
+        status("queryStatus", `Session load failed: ${error.message}`);
+      }
+    }
+
+    function renderQuerySessions(sessions) {
+      const root = document.getElementById("querySessions");
+      root.innerHTML = "";
+      if (!sessions.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty-state";
+        empty.textContent = "No recent sessions yet.";
+        root.appendChild(empty);
+        return;
+      }
+      for (const session of sessions) {
+        const item = document.createElement("div");
+        item.className = "result";
+        item.innerHTML = `
+          <h3>${escapeHtml(session.title || "Ask The Wiki Session")}</h3>
+          <div class="meta">${escapeHtml(session.updated_at_utc || "")} / ${session.turn_count || 0} turn(s)</div>
+          <div class="toolbar">
+            <button class="secondary" onclick="openQuerySession('${escapeAttribute(session.session_id)}')">Open</button>
+          </div>
+        `;
+        root.appendChild(item);
+      }
+    }
+
+    function renderCurrentQuerySession(session) {
+      const title = document.getElementById("currentQuerySessionTitle");
+      const meta = document.getElementById("currentQuerySessionMeta");
+      if (!session) {
+        title.textContent = "No Session Selected";
+        meta.textContent = "Ask a question to create a session, or open a recent session.";
+        return;
+      }
+      title.textContent = session.title || "Ask The Wiki Session";
+      meta.textContent = `${session.turn_count || 0} turn(s) / ${session.updated_at_utc || ""}`;
+    }
+
+    async function ensureCurrentQuerySession() {
+      if (currentQuerySessionId) {
+        return { session_id: currentQuerySessionId };
+      }
+      return await newQuerySession({ quiet: true });
+    }
+
+    async function newQuerySession(options = {}) {
+      const question = document.getElementById("questionInput").value.trim();
+      const title = question ? question.slice(0, 80) : "Ask The Wiki Session";
+      const data = await requestJson("/api/query/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title })
+      }, 10);
+      currentQuerySessionId = data.session.session_id;
+      window.localStorage.setItem(CURRENT_QUERY_SESSION_KEY, currentQuerySessionId);
+      renderCurrentQuerySession(data.session);
+      await loadQuerySessions();
+      if (!options.quiet) {
+        renderSessionDetail(data.session);
+        status("queryStatus", "New session ready.");
+      }
+      return data.session;
+    }
+
+    async function openQuerySession(sessionId) {
+      const data = await requestJson(`/api/query/sessions/${encodeURIComponent(sessionId)}`, {}, 10);
+      currentQuerySessionId = data.session.session_id;
+      window.localStorage.setItem(CURRENT_QUERY_SESSION_KEY, currentQuerySessionId);
+      renderCurrentQuerySession(data.session);
+      renderSessionDetail(data.session);
+      status("queryStatus", "Session loaded.");
+    }
+
+    async function compactCurrentQuerySession() {
+      if (!currentQuerySessionId) {
+        status("queryStatus", "Open or create a session before compacting.");
+        return;
+      }
+      try {
+        status("queryStatus", "Compacting session...");
+        const data = await requestJson(`/api/query/sessions/${encodeURIComponent(currentQuerySessionId)}/compact`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}"
+        }, 120);
+        renderCurrentQuerySession(data.session);
+        renderSessionDetail(data.session);
+        await loadQuerySessions();
+        status("queryStatus", "Session compacted.");
+      } catch (error) {
+        status("queryStatus", `Compact failed: ${error.message}`);
+      }
+    }
+
+    function renderSessionDetail(session) {
+      const root = document.getElementById("queryOutput");
+      root.innerHTML = "";
+      const summary = document.createElement("div");
+      summary.className = "result";
+      summary.innerHTML = `
+        <h3>${escapeHtml(session.title || "Ask The Wiki Session")}</h3>
+        <div class="meta">${escapeHtml(session.session_id || "")} / ${session.turn_count || 0} turn(s)</div>
+        ${session.compact_summary ? `<div>${escapeHtml(session.compact_summary)}</div>` : ""}
+      `;
+      root.appendChild(summary);
+      (session.turns || []).forEach((turn, index) => {
+        const meta = [];
+        if (turn.saved_query_path) {
+          meta.push(`filed: ${turn.saved_query_path}`);
+        }
+        meta.push(turn.created_at_utc || "");
+        const item = document.createElement("div");
+        item.className = "result";
+        item.innerHTML = `
+          <h3>${escapeHtml(turn.question || "Question")}</h3>
+          <div class="meta">${escapeHtml(meta.filter(Boolean).join(" / "))}</div>
+          <div class="mono">${escapeHtml(turn.answer_markdown || "")}</div>
+          ${turn.saved_query_path ? "" : `<div class="toolbar"><button onclick="saveSessionTurn(${index})">Save This Answer</button></div>`}
+        `;
+        root.appendChild(item);
+      });
+    }
+
+    async function saveSessionTurn(turnIndex) {
+      if (!currentQuerySessionId) {
+        status("queryStatus", "Open a session before saving an answer.");
+        return;
+      }
+      try {
+        status("queryStatus", "Saving answer...");
+        const data = await requestJson(`/api/query/sessions/${encodeURIComponent(currentQuerySessionId)}/turns/${turnIndex}/save`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}"
+        }, 20);
+        renderCurrentQuerySession(data.session);
+        renderSessionDetail(data.session);
+        await loadQuerySessions();
+        status("queryStatus", "Answer saved.");
+      } catch (error) {
+        status("queryStatus", `Save failed: ${error.message}`);
+      }
+    }
+
     async function runQuery(save) {
       const question = document.getElementById("questionInput").value.trim();
       if (!question) {
@@ -1789,10 +2047,11 @@ INDEX_HTML = """<!doctype html>
 
       let response;
       try {
+        const session = await ensureCurrentQuerySession();
         response = await fetch("/api/query/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ question, save })
+          body: JSON.stringify({ question, save, session_id: session.session_id })
         });
       } catch (error) {
         status("queryStatus", `Query failed to start: ${error.message}`);
@@ -1836,7 +2095,12 @@ INDEX_HTML = """<!doctype html>
               status("queryStatus", "Streaming answer...");
             } else if (event.type === "done") {
               sawDone = true;
+              if (event.session_id) {
+                currentQuerySessionId = event.session_id;
+                window.localStorage.setItem(CURRENT_QUERY_SESSION_KEY, currentQuerySessionId);
+              }
               renderFinalQueryResult(root, meta, answer, event, streamedText || event.answer_markdown || "");
+              await loadQuerySessions();
               status("queryStatus", "Answer ready.");
             } else if (event.type === "error") {
               status("queryStatus", event.error || "Query failed.");
@@ -1861,6 +2125,19 @@ INDEX_HTML = """<!doctype html>
       const existingSources = root.querySelector('[data-query-section="sources"]');
       if (existingSources) {
         existingSources.remove();
+      }
+
+      const existingSave = root.querySelector('[data-query-section="save"]');
+      if (existingSave) {
+        existingSave.remove();
+      }
+
+      if (!data.saved_path && data.session_id) {
+        const saveBox = document.createElement("div");
+        saveBox.className = "toolbar";
+        saveBox.dataset.querySection = "save";
+        saveBox.innerHTML = `<button onclick="saveSessionTurn(-1)">Save This Answer</button>`;
+        root.appendChild(saveBox);
       }
 
       if ((data.follow_up_questions || []).length) {

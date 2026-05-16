@@ -12,6 +12,7 @@ from lmit_wiki.config import default_config, load_config, write_local_config
 from lmit_wiki.auto import AutoSyncResult, SyncedPage
 from lmit_wiki.runtime import save_runtime_settings
 from lmit_wiki.server import INDEX_HTML, ThreadingWSGIServer, WikiWebApp, server_pid_path, stop_wiki_ui
+from lmit_wiki.sessions import append_query_session_turn, create_query_session
 
 
 def test_web_ui_exposes_status_ingest_and_lint(tmp_path):
@@ -99,8 +100,12 @@ def test_web_ui_exposes_llm_profile_controls_and_default_restore(tmp_path):
     assert "Add Gemini" in html
     assert "Restore Defaults" in html
     assert "Fetch Models" in html
+    assert "Search Result Limit" in html
+    assert "Ask Context Capacity" in html
 
     defaults = _call_json(app, "POST", "/api/settings/defaults")
+    assert defaults["search_limit"] == 8
+    assert defaults["query_context_char_limit"] == 2400
     profile_ids = [profile["id"] for profile in defaults["profiles"]]
     assert profile_ids == [
         "ollama-local",
@@ -117,6 +122,22 @@ def test_web_ui_exposes_llm_profile_controls_and_default_restore(tmp_path):
     assert litellm["timeout_seconds"] == 300
     assert litellm["api_key_env"] == "LITELLM_API_KEY"
     assert defaults["active_profile"] == "ollama-local"
+
+
+def test_web_ui_saves_global_search_and_context_settings(tmp_path):
+    cfg = default_config(tmp_path)
+    app = WikiWebApp(cfg)
+    defaults = _call_json(app, "POST", "/api/settings/defaults")
+    defaults["search_limit"] = 12
+    defaults["query_context_char_limit"] = 5000
+
+    saved = _call_json(app, "POST", "/api/settings", defaults)
+    loaded = _call_json(app, "GET", "/api/settings")
+
+    assert saved["search_limit"] == 12
+    assert saved["query_context_char_limit"] == 5000
+    assert loaded["search_limit"] == 12
+    assert loaded["query_context_char_limit"] == 5000
 
 
 def test_web_ui_can_save_knowledge_base_and_source_paths(tmp_path):
@@ -265,7 +286,7 @@ def test_web_ui_script_keeps_newline_escape_sequences():
 
 def test_web_ui_layout_keeps_long_paths_from_pushing_settings_panel():
     assert "min-width: 0;" in INDEX_HTML
-    assert "grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);" in INDEX_HTML
+    assert "grid-template-columns: minmax(0, 1fr) minmax(320px, 0.72fr);" in INDEX_HTML
     assert ".toolbar input:not([type=\"checkbox\"])" in INDEX_HTML
     assert "flex: 1 1 220px;" in INDEX_HTML
     assert "overflow-wrap: anywhere;" in INDEX_HTML
@@ -277,6 +298,22 @@ def test_save_paths_does_not_reload_llm_settings_panel():
     save_paths_body = INDEX_HTML[start:end]
 
     assert "loadSettings()" not in save_paths_body
+
+
+def test_web_ui_exposes_query_session_controls():
+    assert "New Session" in INDEX_HTML
+    assert "Compact" in INDEX_HTML
+    assert "Recent Sessions" in INDEX_HTML
+    assert "Save This Answer" in INDEX_HTML
+    assert 'class="warm" onclick="runQuery(true)"' in INDEX_HTML
+    assert 'onclick="saveSessionTurn(' in INDEX_HTML
+    assert "/api/query/sessions" in INDEX_HTML
+    assert "currentQuerySessionId" in INDEX_HTML
+    assert "@media (max-width: 760px)" in INDEX_HTML
+
+
+def test_web_ui_sync_now_uses_warm_action_style():
+    assert '<button id="syncButton" class="warm" onclick="runSync()">Sync Now</button>' in INDEX_HTML
 
 
 def test_document_route_serves_wiki_markdown_and_blocks_missing_paths(tmp_path):
@@ -487,10 +524,11 @@ def test_web_ui_streams_query_answer_chunks(tmp_path, monkeypatch):
     cfg = default_config(tmp_path)
     app = WikiWebApp(cfg)
 
-    def fake_stream_query(cfg_arg, question, *, save=True, on_chunk=None):
+    def fake_stream_query(cfg_arg, question, *, save=True, session_id=None, on_chunk=None):
         assert cfg_arg == cfg
         assert question == "what changed?"
         assert save is False
+        assert session_id is None
         if on_chunk is not None:
             on_chunk("# Changes\n\n")
             on_chunk("The wiki changed. [S1]")
@@ -533,7 +571,8 @@ def test_web_ui_streamed_query_sources_include_only_cited_results(tmp_path, monk
         path.write_text(f"# Source {index}\n\nBody {index}", encoding="utf-8")
         source_paths.append(path)
 
-    def fake_stream_query(cfg_arg, question, *, save=True, on_chunk=None):
+    def fake_stream_query(cfg_arg, question, *, save=True, session_id=None, on_chunk=None):
+        assert session_id is None
         return QueryAnswer(
             question=question,
             title="Changes",
@@ -562,6 +601,126 @@ def test_web_ui_streamed_query_sources_include_only_cited_results(tmp_path, monk
     assert done["type"] == "done"
     assert [item["citation"] for item in done["search_results"]] == ["S2"]
     assert [item["title"] for item in done["search_results"]] == ["Source 2"]
+
+
+def test_web_ui_exposes_query_session_endpoints(tmp_path):
+    cfg = default_config(tmp_path)
+    app = WikiWebApp(cfg)
+
+    created = _call_json(app, "POST", "/api/query/sessions", {"title": "Session A"})
+    session_id = created["session"]["session_id"]
+    append_query_session_turn(
+        cfg,
+        session_id,
+        QueryAnswer(
+            question="first question",
+            title="First answer",
+            answer_markdown="first answer body",
+            follow_up_questions=(),
+            search_results=(),
+            completion=None,
+            saved_path=None,
+        ),
+    )
+
+    listing = _call_json(app, "GET", "/api/query/sessions")
+    detail = _call_json(app, "GET", f"/api/query/sessions/{session_id}")
+
+    assert listing["sessions"][0]["session_id"] == session_id
+    assert listing["sessions"][0]["title"] == "Session A"
+    assert detail["session"]["turns"][0]["question"] == "first question"
+
+
+def test_web_ui_compacts_query_session(tmp_path, monkeypatch):
+    cfg = default_config(tmp_path)
+    app = WikiWebApp(cfg)
+    session = create_query_session(cfg, title="Compact me")
+    for index in range(4):
+        append_query_session_turn(
+            cfg,
+            session.session_id,
+            QueryAnswer(
+                question=f"question {index}",
+                title=f"answer {index}",
+                answer_markdown=f"body {index}",
+                follow_up_questions=(),
+                search_results=(),
+                completion=None,
+                saved_path=None,
+            ),
+        )
+
+    monkeypatch.setattr(
+        "lmit_wiki.sessions.invoke_text_completion",
+        lambda cfg_arg, messages, *, purpose, llm_policy: "Compacted session summary.",
+    )
+
+    payload = _call_json(app, "POST", f"/api/query/sessions/{session.session_id}/compact")
+
+    assert payload["session"]["compact_summary"] == "Compacted session summary."
+    assert [turn["question"] for turn in payload["session"]["turns"]] == [
+        "question 2",
+        "question 3",
+    ]
+
+
+def test_web_ui_saves_existing_query_session_turn(tmp_path):
+    cfg = default_config(tmp_path)
+    app = WikiWebApp(cfg)
+    session = create_query_session(cfg, title="Save later")
+    append_query_session_turn(
+        cfg,
+        session.session_id,
+        QueryAnswer(
+            question="save this?",
+            title="Saved later",
+            answer_markdown="Saved later body.",
+            follow_up_questions=(),
+            search_results=(),
+            completion=None,
+            saved_path=None,
+        ),
+    )
+
+    payload = _call_json(app, "POST", f"/api/query/sessions/{session.session_id}/turns/0/save")
+
+    assert payload["saved_path"]
+    assert payload["session"]["turns"][0]["saved_query_path"]
+
+
+def test_web_ui_stream_query_accepts_session_id(tmp_path, monkeypatch):
+    cfg = default_config(tmp_path)
+    app = WikiWebApp(cfg)
+    session = create_query_session(cfg, title="Stream session")
+
+    def fake_stream_query(cfg_arg, question, *, save=True, session_id=None, on_chunk=None):
+        assert cfg_arg == cfg
+        assert question == "what changed?"
+        assert save is False
+        assert session_id == session.session_id
+        return QueryAnswer(
+            question=question,
+            title="Changes",
+            answer_markdown="The wiki changed. [S1]",
+            follow_up_questions=(),
+            search_results=(),
+            completion=None,
+            saved_path=None,
+        )
+
+    monkeypatch.setattr("lmit_wiki.server.stream_wiki_query_answer", fake_stream_query)
+
+    body = _call_text(
+        app,
+        "POST",
+        "/api/query/stream",
+        payload={"question": "what changed?", "save": False, "session_id": session.session_id},
+        content_length=True,
+    )
+
+    events = [json.loads(line) for line in body.splitlines() if line.strip()]
+    assert events[-1]["type"] == "done"
+    assert events[-1]["session_id"] == session.session_id
 
 
 def test_web_ui_fetches_model_choices_for_supported_providers(tmp_path, monkeypatch):

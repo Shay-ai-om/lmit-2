@@ -42,6 +42,24 @@ def test_search_finds_system_source_catalog(tmp_path):
     )
 
 
+def test_ingest_source_note_keeps_generous_source_preview(tmp_path):
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    late_detail = "Late source detail: durable context should still appear in the source note."
+    (raw_dir / "alpha.md").write_text(
+        "# Alpha\n\n" + ("opening filler " * 80) + "\n\n" + late_detail,
+        encoding="utf-8",
+    )
+
+    cfg = default_config(tmp_path)
+    ingest_wiki(cfg, source_dirs=[raw_dir])
+    [source_note_path] = list(cfg.wiki.sources_dir.glob("*.md"))
+
+    source_note = source_note_path.read_text(encoding="utf-8")
+
+    assert late_detail in source_note
+
+
 def test_refresh_index_preserves_fallback_homepage_mode(tmp_path):
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
