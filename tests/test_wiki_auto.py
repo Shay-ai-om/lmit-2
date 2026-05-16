@@ -8,7 +8,7 @@ import pytest
 from lmit_wiki.auto import auto_sync_wiki, _curate_extracted_updates, _sync_source_signature
 from lmit_wiki.builder import ingest_wiki
 from lmit_wiki.config import default_config
-from lmit_wiki.runtime import LLMInvocationError
+from lmit_wiki.runtime import LLMInvocationError, default_runtime_settings_payload, save_runtime_settings
 
 
 def test_auto_sync_saves_completed_progress_before_later_failure(tmp_path, monkeypatch):
@@ -133,6 +133,45 @@ def test_auto_sync_force_processes_saved_sources(tmp_path, monkeypatch):
     assert normal.processed_sources == 0
     assert forced.processed_sources == 1
     assert calls == ["Alpha"]
+
+
+def test_auto_sync_reruns_and_uses_global_raw_excerpt_capacity(tmp_path, monkeypatch):
+    cfg = default_config(tmp_path)
+    raw_dir = cfg.wiki_ingest.source_dirs[0]
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    late_detail = "Late raw detail only visible when sync raw excerpt capacity is higher."
+    (raw_dir / "alpha.md").write_text(
+        "# Alpha\n\n" + ("opening filler " * 80) + "\n\n" + late_detail,
+        encoding="utf-8",
+    )
+    settings = default_runtime_settings_payload()
+    settings["raw_excerpt_char_limit"] = 500
+    save_runtime_settings(cfg, settings)
+    ingest_wiki(cfg)
+
+    captured_prompts: list[str] = []
+
+    def fake_completion(cfg_arg, messages, *, purpose, llm_policy):
+        captured_prompts.append(messages[-1]["content"])
+        return {"topics": [], "entities": []}, None
+
+    monkeypatch.setattr("lmit_wiki.auto.invoke_json_completion", fake_completion)
+
+    first = auto_sync_wiki(cfg)
+    assert first.processed_sources == 1
+    assert late_detail not in captured_prompts[-1]
+
+    captured_prompts.clear()
+    unchanged = auto_sync_wiki(cfg)
+    assert unchanged.processed_sources == 0
+    assert captured_prompts == []
+
+    settings["raw_excerpt_char_limit"] = 2500
+    save_runtime_settings(cfg, settings)
+    rerun = auto_sync_wiki(cfg)
+
+    assert rerun.processed_sources == 1
+    assert late_detail in captured_prompts[-1]
 
 
 def test_auto_sync_records_llm_failures_and_continues_sources(tmp_path, monkeypatch):

@@ -12,7 +12,12 @@ from lmit_wiki.config import AppConfig
 from lmit_wiki.path_safety import ensure_within_root, safe_write_text
 from lmit_wiki.builder import append_log, init_wiki, refresh_index
 from lmit_wiki.policy import llm_policy_for_sources
-from lmit_wiki.runtime import LLMInvocationError, invoke_json_completion
+from lmit_wiki.runtime import (
+    DEFAULT_RAW_EXCERPT_CHAR_LIMIT,
+    LLMInvocationError,
+    effective_raw_excerpt_char_limit,
+    invoke_json_completion,
+)
 from lmit_wiki.state import load_wiki_state, record_recent_sync, save_wiki_state
 from lmit_wiki.text import portable_markdown_filename, strip_frontmatter
 
@@ -81,12 +86,13 @@ def auto_sync_wiki(
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     state = _load_state(cfg)
+    raw_excerpt_char_limit = effective_raw_excerpt_char_limit(cfg)
     pending = [
         record
         for record in manifest.get("sources", [])
         if force
         or state["processed_sources"].get(str(record["relative_path"]))
-        != _sync_source_signature(record)
+        != _sync_source_signature(record, raw_excerpt_char_limit=raw_excerpt_char_limit)
     ]
     if limit is not None:
         pending = pending[:limit]
@@ -134,10 +140,18 @@ def auto_sync_wiki(
                     synced = _upsert_page(cfg, record, kind, item)
                     pages.append(synced)
                     catalog[kind].append(item["name"])
-            state["processed_sources"][str(record["relative_path"])] = _sync_source_signature(record)
+            state["processed_sources"][str(record["relative_path"])] = _sync_source_signature(
+                record,
+                raw_excerpt_char_limit=raw_excerpt_char_limit,
+            )
             _clear_failed_source(state, record)
         except LLMInvocationError as exc:
-            failed = _record_failed_source(state, record, exc)
+            failed = _record_failed_source(
+                state,
+                record,
+                exc,
+                raw_excerpt_char_limit=raw_excerpt_char_limit,
+            )
             failed_sources.append(failed)
             _save_state(cfg, state)
             _report_progress(
@@ -267,6 +281,7 @@ def _extract_source_updates(
         if source_note_path.exists()
         else ""
     )
+    raw_excerpt_char_limit = effective_raw_excerpt_char_limit(cfg)
     page_catalog = "\n".join(
         [
             "Existing topic pages:",
@@ -301,10 +316,10 @@ def _extract_source_updates(
                         f"Source excerpt: {record.get('excerpt', '')}",
                         page_catalog,
                         "Source note markdown:",
-                        source_note_text[:2200],
+                        source_note_text[:raw_excerpt_char_limit],
                         "",
                         "Raw markdown excerpt:",
-                        strip_frontmatter(raw_text)[:2600],
+                        strip_frontmatter(raw_text)[:raw_excerpt_char_limit],
                         "",
                         (
                             "Return JSON only in this shape:\n"
@@ -567,6 +582,8 @@ def _record_failed_source(
     state: dict[str, object],
     record: dict[str, object],
     exc: Exception,
+    *,
+    raw_excerpt_char_limit: int = DEFAULT_RAW_EXCERPT_CHAR_LIMIT,
 ) -> FailedSource:
     failed_sources = state.setdefault("failed_sources", {})
     if not isinstance(failed_sources, dict):
@@ -580,7 +597,10 @@ def _record_failed_source(
     )
     failed_sources[relative_path] = {
         "content_hash": str(record.get("content_hash", "")),
-        "sync_signature": _sync_source_signature(record),
+        "sync_signature": _sync_source_signature(
+            record,
+            raw_excerpt_char_limit=raw_excerpt_char_limit,
+        ),
         "title": failed.title,
         "relative_path": failed.relative_path,
         "error": failed.error,
@@ -606,12 +626,17 @@ def _save_state(cfg: AppConfig, state: dict[str, object]) -> None:
     save_wiki_state(cfg, state)
 
 
-def _sync_source_signature(record: dict[str, object]) -> str:
+def _sync_source_signature(
+    record: dict[str, object],
+    *,
+    raw_excerpt_char_limit: int = DEFAULT_RAW_EXCERPT_CHAR_LIMIT,
+) -> str:
     source_note_text = _record_path_text(record.get("source_note_path"))
     return sha256(
         "\n".join(
             [
                 f"v{SYNC_SOURCE_SIGNATURE_VERSION}",
+                f"raw_excerpt_char_limit:{raw_excerpt_char_limit}",
                 str(record.get("content_hash", "")),
                 str(record.get("storage_key", "")),
                 str(record.get("excerpt", "")),

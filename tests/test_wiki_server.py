@@ -102,10 +102,18 @@ def test_web_ui_exposes_llm_profile_controls_and_default_restore(tmp_path):
     assert "Fetch Models" in html
     assert "Search Result Limit" in html
     assert "Ask Context Capacity" in html
+    assert "Raw Excerpt Capacity" in html
+    assert 'class="field has-help"' in html
+    assert 'class="field-help"' in html
+    assert 'onclick="showFieldHelp(' in html
+    assert "const SETTINGS_HELP" in html
+    assert "它不是只搜尋前幾筆 source" in html
+    assert "控制 Sync prompt" in html
 
     defaults = _call_json(app, "POST", "/api/settings/defaults")
     assert defaults["search_limit"] == 8
     assert defaults["query_context_char_limit"] == 2400
+    assert defaults["raw_excerpt_char_limit"] == 6000
     profile_ids = [profile["id"] for profile in defaults["profiles"]]
     assert profile_ids == [
         "ollama-local",
@@ -130,14 +138,17 @@ def test_web_ui_saves_global_search_and_context_settings(tmp_path):
     defaults = _call_json(app, "POST", "/api/settings/defaults")
     defaults["search_limit"] = 12
     defaults["query_context_char_limit"] = 5000
+    defaults["raw_excerpt_char_limit"] = 9000
 
     saved = _call_json(app, "POST", "/api/settings", defaults)
     loaded = _call_json(app, "GET", "/api/settings")
 
     assert saved["search_limit"] == 12
     assert saved["query_context_char_limit"] == 5000
+    assert saved["raw_excerpt_char_limit"] == 9000
     assert loaded["search_limit"] == 12
     assert loaded["query_context_char_limit"] == 5000
+    assert loaded["raw_excerpt_char_limit"] == 9000
 
 
 def test_web_ui_can_save_knowledge_base_and_source_paths(tmp_path):

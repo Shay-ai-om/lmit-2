@@ -1,5 +1,5 @@
 #define AppName "LMIT-2 Wiki"
-#define AppVersion "0.1.22"
+#define AppVersion "0.1.23"
 #define AppPublisher "LMIT"
 
 [Setup]

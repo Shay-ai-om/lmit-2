@@ -1068,9 +1068,42 @@ INDEX_HTML = """<!doctype html>
       min-width: 0;
     }
 
+    .field.has-help {
+      position: relative;
+    }
+
     .field span {
       color: var(--muted);
       font-size: 12px;
+    }
+
+    .field.has-help input {
+      padding-right: 42px;
+    }
+
+    .field-help {
+      position: absolute;
+      top: 0;
+      right: 0;
+      width: 24px;
+      height: 24px;
+      padding: 0;
+      border-radius: 50%;
+      border: 1px solid rgba(19, 111, 99, 0.22);
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 13px;
+      line-height: 1;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 140ms ease;
+    }
+
+    .field.has-help:hover .field-help,
+    .field.has-help:focus-within .field-help,
+    .field-help:focus-visible {
+      opacity: 1;
+      pointer-events: auto;
     }
 
     .profile-header {
@@ -1260,13 +1293,20 @@ INDEX_HTML = """<!doctype html>
             <span>Fallback Order</span>
             <input id="fallbackOrder" placeholder="ollama-local, lm-studio-rest, litellm-local, openai-compatible, gemini">
           </label>
-          <label class="field">
+          <label class="field has-help">
             <span>Search Result Limit</span>
             <input id="searchLimit" type="number" min="1" max="50" step="1" placeholder="8">
+            <button type="button" class="field-help" aria-label="Explain Search Result Limit" onclick="showFieldHelp('searchLimit', event)">?</button>
           </label>
-          <label class="field">
+          <label class="field has-help">
             <span>Ask Context Capacity</span>
             <input id="queryContextCharLimit" type="number" min="200" max="20000" step="100" placeholder="2400">
+            <button type="button" class="field-help" aria-label="Explain Ask Context Capacity" onclick="showFieldHelp('queryContextCharLimit', event)">?</button>
+          </label>
+          <label class="field has-help">
+            <span>Raw Excerpt Capacity</span>
+            <input id="rawExcerptCharLimit" type="number" min="500" max="50000" step="500" placeholder="6000">
+            <button type="button" class="field-help" aria-label="Explain Raw Excerpt Capacity" onclick="showFieldHelp('rawExcerptCharLimit', event)">?</button>
           </label>
         </div>
         <div class="toolbar">
@@ -1404,6 +1444,20 @@ INDEX_HTML = """<!doctype html>
     let syncPollTimer = null;
     let currentQuerySessionId = null;
     const CURRENT_QUERY_SESSION_KEY = "lmit2.currentQuerySessionId";
+    const SETTINGS_HELP = {
+      searchLimit: {
+        title: "Search Result Limit",
+        body: "控制 Search 和 Ask The Wiki 每次從全知識庫排序後取回的最大結果數。它不是只搜尋前幾筆 source，而是搜尋整個索引後截取前 N 筆結果。"
+      },
+      queryContextCharLimit: {
+        title: "Ask Context Capacity",
+        body: "控制 Ask The Wiki 每個搜尋結果送進 LLM 的最大字元數。內容過長時會優先保留命中片段與文件開頭，引用仍只對應本次搜尋來源。"
+      },
+      rawExcerptCharLimit: {
+        title: "Raw Excerpt Capacity",
+        body: "控制 Ingest 寫入 source note/manifest 的 raw excerpt 容量，也控制 Sync prompt 讀取 source note 與 raw markdown excerpt 的字元數。調大後重新 Ingest，再跑 Sync 會讓較深位置的來源內容進入同步判斷。"
+      }
+    };
 
     async function boot() {
       await loadStatus();
@@ -1418,6 +1472,18 @@ INDEX_HTML = """<!doctype html>
 
     function toggleManual() {
       document.getElementById("manualPanel").classList.toggle("open");
+    }
+
+    function showFieldHelp(key, event) {
+      if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      const help = SETTINGS_HELP[key];
+      if (!help) {
+        return;
+      }
+      window.alert(`${help.title}\\n\\n${help.body}`);
     }
 
     function requestJson(url, options = {}, timeoutSeconds = 20) {
@@ -1625,6 +1691,7 @@ INDEX_HTML = """<!doctype html>
         document.getElementById("fallbackOrder").value = (data.fallback_order || []).join(", ");
         document.getElementById("searchLimit").value = data.search_limit || 8;
         document.getElementById("queryContextCharLimit").value = data.query_context_char_limit || 2400;
+        document.getElementById("rawExcerptCharLimit").value = data.raw_excerpt_char_limit || 6000;
         renderProfiles(data.profiles || []);
         status("settingsStatus", "Settings loaded.");
       } catch (error) {
@@ -1645,6 +1712,7 @@ INDEX_HTML = """<!doctype html>
         document.getElementById("fallbackOrder").value = (data.fallback_order || []).join(", ");
         document.getElementById("searchLimit").value = data.search_limit || 8;
         document.getElementById("queryContextCharLimit").value = data.query_context_char_limit || 2400;
+        document.getElementById("rawExcerptCharLimit").value = data.raw_excerpt_char_limit || 6000;
         renderProfiles(data.profiles || []);
         status("settingsStatus", "Default profiles restored.");
       } catch (error) {
@@ -1674,6 +1742,7 @@ INDEX_HTML = """<!doctype html>
           fallback_order: document.getElementById("fallbackOrder").value.split(",").map((item) => item.trim()).filter(Boolean),
           search_limit: Number(document.getElementById("searchLimit").value || "8"),
           query_context_char_limit: Number(document.getElementById("queryContextCharLimit").value || "2400"),
+          raw_excerpt_char_limit: Number(document.getElementById("rawExcerptCharLimit").value || "6000"),
           profiles
         };
         const data = await requestJson("/api/settings", {
@@ -1683,6 +1752,7 @@ INDEX_HTML = """<!doctype html>
         }, 20);
         document.getElementById("searchLimit").value = data.search_limit || 8;
         document.getElementById("queryContextCharLimit").value = data.query_context_char_limit || 2400;
+        document.getElementById("rawExcerptCharLimit").value = data.raw_excerpt_char_limit || 6000;
         renderProfiles(data.profiles || []);
         status("settingsStatus", "Settings saved. This did not call an LLM.");
       } catch (error) {

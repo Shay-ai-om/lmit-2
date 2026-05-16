@@ -14,7 +14,11 @@ from lmit_wiki.config import AppConfig
 from lmit_wiki.path_safety import ensure_within_root, safe_write_text
 from lmit_wiki.models import IngestResult, SourceDocument
 from lmit_wiki.policy import llm_policy_for_sources, source_visibility
-from lmit_wiki.runtime import ensure_runtime_settings_file
+from lmit_wiki.runtime import (
+    DEFAULT_RAW_EXCERPT_CHAR_LIMIT,
+    effective_raw_excerpt_char_limit,
+    ensure_runtime_settings_file,
+)
 from lmit_wiki.schema import SCHEMA_MARKDOWN
 from lmit_wiki.state import homepage_state, set_homepage_mode
 from lmit_wiki.text import excerpt, extract_urls, first_heading, source_note_name, strip_frontmatter
@@ -28,7 +32,7 @@ class PageEntry:
     text: str
 
 
-SOURCE_NOTE_EXCERPT_CHARS = 6000
+SOURCE_NOTE_EXCERPT_CHARS = DEFAULT_RAW_EXCERPT_CHAR_LIMIT
 
 
 def init_wiki(cfg: AppConfig) -> None:
@@ -71,6 +75,7 @@ def ingest_wiki(
     ingest_mode: str = "standard",
 ) -> IngestResult:
     init_wiki(cfg)
+    raw_excerpt_char_limit = effective_raw_excerpt_char_limit(cfg)
     source_roots = _source_roots(cfg, source_dir=source_dir, source_dirs=source_dirs)
     source_ids = _source_ids_for_roots(source_roots)
     for source_root in source_roots:
@@ -118,7 +123,7 @@ def ingest_wiki(
                 content_hash=content_hash,
                 size=len(text.encode("utf-8")),
                 urls=extract_urls(text),
-                excerpt=excerpt(text, max_chars=SOURCE_NOTE_EXCERPT_CHARS),
+                excerpt=excerpt(text, max_chars=raw_excerpt_char_limit),
                 source_id=source_id,
                 storage_key=storage_key,
             )

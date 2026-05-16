@@ -37,10 +37,13 @@ DEFAULT_REMOTE_TIMEOUT_SECONDS = 120
 DEFAULT_LOCAL_TIMEOUT_SECONDS = 300
 DEFAULT_SEARCH_LIMIT = 8
 DEFAULT_QUERY_CONTEXT_CHAR_LIMIT = 2400
+DEFAULT_RAW_EXCERPT_CHAR_LIMIT = 6000
 MIN_SEARCH_LIMIT = 1
 MAX_SEARCH_LIMIT = 50
 MIN_QUERY_CONTEXT_CHAR_LIMIT = 200
 MAX_QUERY_CONTEXT_CHAR_LIMIT = 20000
+MIN_RAW_EXCERPT_CHAR_LIMIT = 500
+MAX_RAW_EXCERPT_CHAR_LIMIT = 50000
 DEFAULT_LOCAL_PROFILE_IDS = {
     "ollama-local",
     "lm-studio-local",
@@ -70,6 +73,7 @@ class WikiRuntimeSettings:
     profiles: tuple[LLMProfile, ...]
     search_limit: int = DEFAULT_SEARCH_LIMIT
     query_context_char_limit: int = DEFAULT_QUERY_CONTEXT_CHAR_LIMIT
+    raw_excerpt_char_limit: int = DEFAULT_RAW_EXCERPT_CHAR_LIMIT
 
     def ordered_profiles(self) -> list[LLMProfile]:
         by_id = {profile.profile_id: profile for profile in self.profiles if profile.enabled}
@@ -106,6 +110,7 @@ def default_runtime_settings_payload() -> dict[str, Any]:
         "version": 1,
         "search_limit": DEFAULT_SEARCH_LIMIT,
         "query_context_char_limit": DEFAULT_QUERY_CONTEXT_CHAR_LIMIT,
+        "raw_excerpt_char_limit": DEFAULT_RAW_EXCERPT_CHAR_LIMIT,
         "active_profile": "ollama-local",
         "fallback_order": [
             "ollama-local",
@@ -200,6 +205,7 @@ def save_runtime_settings(
         "version": 1,
         "search_limit": settings.search_limit,
         "query_context_char_limit": settings.query_context_char_limit,
+        "raw_excerpt_char_limit": settings.raw_excerpt_char_limit,
         "active_profile": settings.active_profile_id,
         "fallback_order": list(settings.fallback_order),
         "profiles": [
@@ -229,6 +235,7 @@ def runtime_settings_public_payload(settings: WikiRuntimeSettings) -> dict[str, 
     return {
         "search_limit": settings.search_limit,
         "query_context_char_limit": settings.query_context_char_limit,
+        "raw_excerpt_char_limit": settings.raw_excerpt_char_limit,
         "active_profile": settings.active_profile_id,
         "fallback_order": list(settings.fallback_order),
         "profiles": [
@@ -286,6 +293,10 @@ def merge_runtime_settings_payload(
             "query_context_char_limit",
             existing.query_context_char_limit,
         ),
+        "raw_excerpt_char_limit": incoming.get(
+            "raw_excerpt_char_limit",
+            existing.raw_excerpt_char_limit,
+        ),
         "active_profile": incoming.get("active_profile"),
         "fallback_order": incoming.get("fallback_order", []),
         "profiles": merged_profiles,
@@ -304,6 +315,13 @@ def effective_query_context_char_limit(cfg: AppConfig) -> int:
         return load_runtime_settings(cfg).query_context_char_limit
     except Exception:
         return DEFAULT_QUERY_CONTEXT_CHAR_LIMIT
+
+
+def effective_raw_excerpt_char_limit(cfg: AppConfig) -> int:
+    try:
+        return load_runtime_settings(cfg).raw_excerpt_char_limit
+    except Exception:
+        return DEFAULT_RAW_EXCERPT_CHAR_LIMIT
 
 
 def invoke_text_completion(
@@ -447,6 +465,13 @@ def _settings_from_payload(payload: dict[str, Any]) -> WikiRuntimeSettings:
             minimum=MIN_QUERY_CONTEXT_CHAR_LIMIT,
             maximum=MAX_QUERY_CONTEXT_CHAR_LIMIT,
             field_name="query_context_char_limit",
+        ),
+        raw_excerpt_char_limit=_bounded_int(
+            payload.get("raw_excerpt_char_limit"),
+            default=DEFAULT_RAW_EXCERPT_CHAR_LIMIT,
+            minimum=MIN_RAW_EXCERPT_CHAR_LIMIT,
+            maximum=MAX_RAW_EXCERPT_CHAR_LIMIT,
+            field_name="raw_excerpt_char_limit",
         ),
     )
 

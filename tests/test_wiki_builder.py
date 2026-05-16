@@ -3,6 +3,7 @@ from __future__ import annotations
 from lmit_wiki.builder import ingest_wiki
 from lmit_wiki.builder import init_wiki, refresh_index
 from lmit_wiki.config import default_config
+from lmit_wiki.runtime import default_runtime_settings_payload, save_runtime_settings
 from lmit_wiki.search import search_wiki
 from lmit_wiki.state import record_recent_sync
 
@@ -52,6 +53,27 @@ def test_ingest_source_note_keeps_generous_source_preview(tmp_path):
     )
 
     cfg = default_config(tmp_path)
+    ingest_wiki(cfg, source_dirs=[raw_dir])
+    [source_note_path] = list(cfg.wiki.sources_dir.glob("*.md"))
+
+    source_note = source_note_path.read_text(encoding="utf-8")
+
+    assert late_detail in source_note
+
+
+def test_ingest_uses_global_raw_excerpt_capacity(tmp_path):
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    late_detail = "Late source detail controlled by raw excerpt capacity."
+    (raw_dir / "alpha.md").write_text(
+        "# Alpha\n\n" + ("opening filler " * 420) + "\n\n" + late_detail,
+        encoding="utf-8",
+    )
+
+    cfg = default_config(tmp_path)
+    settings = default_runtime_settings_payload()
+    settings["raw_excerpt_char_limit"] = 9000
+    save_runtime_settings(cfg, settings)
     ingest_wiki(cfg, source_dirs=[raw_dir])
     [source_note_path] = list(cfg.wiki.sources_dir.glob("*.md"))
 
