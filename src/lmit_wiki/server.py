@@ -1085,6 +1085,9 @@ INDEX_HTML = """<!doctype html>
       position: absolute;
       top: 0;
       right: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       width: 24px;
       height: 24px;
       padding: 0;
@@ -1104,6 +1107,48 @@ INDEX_HTML = """<!doctype html>
     .field-help:focus-visible {
       opacity: 1;
       pointer-events: auto;
+    }
+
+    .field-tooltip {
+      position: absolute;
+      top: 30px;
+      right: 0;
+      z-index: 10;
+      display: grid;
+      gap: 4px;
+      width: min(320px, 76vw);
+      padding: 10px 12px;
+      border: 1px solid rgba(19, 111, 99, 0.18);
+      border-radius: 8px;
+      background: #fffaf3;
+      box-shadow: 0 12px 28px rgba(12, 31, 43, 0.14);
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 400;
+      line-height: 1.5;
+      text-align: left;
+      visibility: hidden;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(-4px);
+      transition: opacity 120ms ease, transform 120ms ease, visibility 120ms ease;
+    }
+
+    .field-tooltip strong {
+      color: var(--ink);
+      font-size: 12px;
+    }
+
+    .field-tooltip span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .field-help:hover .field-tooltip,
+    .field-help:focus-visible .field-tooltip {
+      visibility: visible;
+      opacity: 1;
+      transform: translateY(0);
     }
 
     .profile-header {
@@ -1296,17 +1341,32 @@ INDEX_HTML = """<!doctype html>
           <label class="field has-help">
             <span>Search Result Limit</span>
             <input id="searchLimit" type="number" min="1" max="50" step="1" placeholder="8">
-            <button type="button" class="field-help" aria-label="Explain Search Result Limit" onclick="showFieldHelp('searchLimit', event)">?</button>
+            <span class="field-help" tabindex="0" aria-label="Search Result Limit help">?
+              <span class="field-tooltip" role="tooltip">
+                <strong>Search Result Limit</strong>
+                <span>控制 Search 和 Ask The Wiki 每次從全知識庫排序後取回的最大結果數。它不是只搜尋前幾筆 source，而是搜尋整個索引後截取前 N 筆結果。</span>
+              </span>
+            </span>
           </label>
           <label class="field has-help">
             <span>Ask Context Capacity</span>
             <input id="queryContextCharLimit" type="number" min="200" max="20000" step="100" placeholder="2400">
-            <button type="button" class="field-help" aria-label="Explain Ask Context Capacity" onclick="showFieldHelp('queryContextCharLimit', event)">?</button>
+            <span class="field-help" tabindex="0" aria-label="Ask Context Capacity help">?
+              <span class="field-tooltip" role="tooltip">
+                <strong>Ask Context Capacity</strong>
+                <span>控制 Ask The Wiki 每個搜尋結果送進 LLM 的最大字元數。內容過長時會優先保留命中片段與文件開頭，引用仍只對應本次搜尋來源。</span>
+              </span>
+            </span>
           </label>
           <label class="field has-help">
             <span>Raw Excerpt Capacity</span>
             <input id="rawExcerptCharLimit" type="number" min="500" max="50000" step="500" placeholder="6000">
-            <button type="button" class="field-help" aria-label="Explain Raw Excerpt Capacity" onclick="showFieldHelp('rawExcerptCharLimit', event)">?</button>
+            <span class="field-help" tabindex="0" aria-label="Raw Excerpt Capacity help">?
+              <span class="field-tooltip" role="tooltip">
+                <strong>Raw Excerpt Capacity</strong>
+                <span>控制 Ingest 寫入 source note/manifest 的 raw excerpt 容量，也控制 Sync prompt 讀取 source note 與 raw markdown excerpt 的字元數。調大後重新 Ingest，再跑 Sync 會讓較深位置的來源內容進入同步判斷。</span>
+              </span>
+            </span>
           </label>
         </div>
         <div class="toolbar">
@@ -1444,26 +1504,12 @@ INDEX_HTML = """<!doctype html>
     let syncPollTimer = null;
     let currentQuerySessionId = null;
     const CURRENT_QUERY_SESSION_KEY = "lmit2.currentQuerySessionId";
-    const SETTINGS_HELP = {
-      searchLimit: {
-        title: "Search Result Limit",
-        body: "控制 Search 和 Ask The Wiki 每次從全知識庫排序後取回的最大結果數。它不是只搜尋前幾筆 source，而是搜尋整個索引後截取前 N 筆結果。"
-      },
-      queryContextCharLimit: {
-        title: "Ask Context Capacity",
-        body: "控制 Ask The Wiki 每個搜尋結果送進 LLM 的最大字元數。內容過長時會優先保留命中片段與文件開頭，引用仍只對應本次搜尋來源。"
-      },
-      rawExcerptCharLimit: {
-        title: "Raw Excerpt Capacity",
-        body: "控制 Ingest 寫入 source note/manifest 的 raw excerpt 容量，也控制 Sync prompt 讀取 source note 與 raw markdown excerpt 的字元數。調大後重新 Ingest，再跑 Sync 會讓較深位置的來源內容進入同步判斷。"
-      }
-    };
 
     async function boot() {
       await loadStatus();
       await loadSettings();
       await loadQuerySessions();
-      await loadSyncJob();
+      await loadSyncJob({ renderInactive: false });
     }
 
     function status(id, text) {
@@ -1472,18 +1518,6 @@ INDEX_HTML = """<!doctype html>
 
     function toggleManual() {
       document.getElementById("manualPanel").classList.toggle("open");
-    }
-
-    function showFieldHelp(key, event) {
-      if (event) {
-        event.preventDefault();
-        event.stopPropagation();
-      }
-      const help = SETTINGS_HELP[key];
-      if (!help) {
-        return;
-      }
-      window.alert(`${help.title}\\n\\n${help.body}`);
     }
 
     function requestJson(url, options = {}, timeoutSeconds = 20) {
@@ -1760,8 +1794,10 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
-    async function loadSyncJob(jobId = "") {
+    async function loadSyncJob(options = {}) {
       try {
+        const jobId = typeof options === "string" ? options : (options.jobId || "");
+        const renderInactive = typeof options === "object" ? options.renderInactive !== false : true;
         const suffix = jobId ? `?job_id=${encodeURIComponent(jobId)}` : "";
         const data = await requestJson(`/api/sync${suffix}`, {}, 10);
         if (!data.job) {
@@ -1771,6 +1807,12 @@ INDEX_HTML = """<!doctype html>
           return;
         }
         currentSyncJobId = data.job.job_id || null;
+        if (!renderInactive && !isSyncJobActive(data.job)) {
+          currentSyncJobId = null;
+          stopSyncPolling();
+          setSyncActionButtons(null);
+          return;
+        }
         renderSyncJob(data.job);
         if (isSyncJobActive(data.job)) {
           queueSyncPoll();

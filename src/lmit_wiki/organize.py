@@ -14,7 +14,7 @@ from lmit_wiki.text import portable_markdown_filename
 
 
 THEMES = {
-    "Architecture": ["architecture", "workflow", "docker", "unraid", "google drive"],
+    "Architecture": ["architecture", "workflow", "google drive"],
     "Automation": ["automation", "telegram", "bot", "skill", "plugin", "cron"],
     "Model Usage": ["claude", "minimax", "opus", "sonnet", "llm", "model"],
     "Cost And Quota": ["cost", "quota", "token", "plan", "pricing"],

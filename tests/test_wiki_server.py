@@ -105,8 +105,13 @@ def test_web_ui_exposes_llm_profile_controls_and_default_restore(tmp_path):
     assert "Raw Excerpt Capacity" in html
     assert 'class="field has-help"' in html
     assert 'class="field-help"' in html
-    assert 'onclick="showFieldHelp(' in html
-    assert "const SETTINGS_HELP" in html
+    assert 'class="field-tooltip"' in html
+    assert 'tabindex="0"' in html
+    assert ".field-help:hover .field-tooltip" in html
+    assert ".field-help:focus-visible .field-tooltip" in html
+    assert 'onclick="showFieldHelp(' not in html
+    assert "const SETTINGS_HELP" not in html
+    assert "window.alert" not in html
     assert "它不是只搜尋前幾筆 source" in html
     assert "控制 Sync prompt" in html
 
@@ -334,6 +339,12 @@ def test_web_ui_exposes_query_session_controls():
 def test_web_ui_sync_now_uses_default_action_style():
     assert '<button id="syncButton" onclick="runSync()">Sync Now</button>' in INDEX_HTML
     assert '<button id="forceSyncButton" class="warm" onclick="runSync(true)">Force Sync</button>' in INDEX_HTML
+    assert "clearSyncOutput" not in INDEX_HTML
+
+
+def test_web_ui_refresh_does_not_restore_finished_sync_output():
+    assert "await loadSyncJob({ renderInactive: false });" in INDEX_HTML
+    assert "const renderInactive = typeof options === \"object\" ? options.renderInactive !== false : true;" in INDEX_HTML
 
 
 def test_document_route_serves_wiki_markdown_and_blocks_missing_paths(tmp_path):

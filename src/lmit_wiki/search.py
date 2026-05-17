@@ -37,7 +37,6 @@ def load_wiki_documents(cfg: AppConfig, *, include_raw: bool = True) -> list[Wik
     docs.extend(_load_dir(cfg.wiki.sources_dir, cfg.wiki.root_dir, "source"))
     docs.extend(_load_dir(cfg.wiki.root_dir / "wiki" / "system", cfg.wiki.root_dir, "system"))
     docs.extend(_load_dir(cfg.wiki.root_dir / "wiki" / "hubs", cfg.wiki.root_dir, "hub"))
-    docs.extend(_load_dir(cfg.wiki.root_dir / "wiki" / "sessions", cfg.wiki.root_dir, "session"))
     docs.extend(_load_dir(cfg.wiki.topics_dir, cfg.wiki.root_dir, "topic"))
     docs.extend(_load_dir(cfg.wiki.entities_dir, cfg.wiki.root_dir, "entity"))
     docs.extend(_load_dir(cfg.wiki.queries_dir, cfg.wiki.root_dir, "query"))

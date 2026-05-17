@@ -44,7 +44,7 @@ def test_query_session_persists_json_and_markdown_transcript(tmp_path):
     assert "# Research thread" in transcript
     assert "## Turn 1" in transcript
     assert "The homepage links were fixed. [S1]" in transcript
-    assert any(item.kind == "session" for item in search_wiki(cfg, "homepage links", include_raw=False))
+    assert not search_wiki(cfg, "homepage links", include_raw=False)
 
 
 def test_archive_query_session_hides_from_recent_list_and_persists_flag(tmp_path):
@@ -140,3 +140,6 @@ def test_save_query_session_turn_files_existing_answer_and_updates_session(tmp_p
         cfg.wiki.root_dir
     ).as_posix()
     assert "](../queries/" in transcript
+    results = search_wiki(cfg, "save this exact answer", include_raw=False)
+    assert any(item.kind == "query" and item.path == saved_path for item in results)
+    assert not any(item.kind == "session" for item in results)
